@@ -7,9 +7,7 @@
 #include <iostream>
 #include <llvm/Config/llvm-config.h>
 
-namespace bpftrace {
-namespace test {
-namespace clang_parser {
+namespace bpftrace::test::clang_parser {
 
 #include "btf_common.h"
 
@@ -22,11 +20,11 @@ static void parse(const std::string &input,
   Driver driver(bpftrace);
   ASSERT_EQ(driver.parse_str(extended_input), 0);
 
-  ast::FieldAnalyser fields(driver.root.get(), bpftrace);
+  ast::FieldAnalyser fields(driver.ctx.root, bpftrace);
   EXPECT_EQ(fields.analyse(), 0);
 
   ClangParser clang;
-  ASSERT_EQ(clang.parse(driver.root.get(), bpftrace), result);
+  ASSERT_EQ(clang.parse(driver.ctx.root, bpftrace), result);
 }
 
 TEST(clang_parser, integers)
@@ -208,13 +206,8 @@ TEST(clang_parser, nested_struct_no_type)
   parse("struct Foo { struct { int x; } bar; union { int y; } baz; }",
         bpftrace);
 
-#if LLVM_VERSION_MAJOR >= 13
   std::string bar_name = "struct Foo::(unnamed at definitions.h:2:14)";
   std::string baz_name = "union Foo::(unnamed at definitions.h:2:37)";
-#else
-  std::string bar_name = "struct Foo::(anonymous at definitions.h:2:14)";
-  std::string baz_name = "union Foo::(anonymous at definitions.h:2:37)";
-#endif
 
   ASSERT_TRUE(bpftrace.structs.Has("struct Foo"));
   ASSERT_TRUE(bpftrace.structs.Has(bar_name));
@@ -359,10 +352,14 @@ TEST(clang_parser, bitfields)
   ASSERT_TRUE(foo->HasField("b"));
   ASSERT_TRUE(foo->HasField("c"));
 
+  // clang-tidy doesn't seem to acknowledge that ASSERT_*() will
+  // return from function so that these are in fact checked accesses.
+  //
+  // NOLINTBEGIN(bugprone-unchecked-optional-access)
   EXPECT_TRUE(foo->GetField("a").type.IsIntTy());
   EXPECT_EQ(foo->GetField("a").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("a").offset, 0);
-  EXPECT_TRUE(foo->GetField("a").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("a").bitfield.has_value());
   EXPECT_EQ(foo->GetField("a").bitfield->read_bytes, 0x1U);
   EXPECT_EQ(foo->GetField("a").bitfield->access_rshift, 0U);
   EXPECT_EQ(foo->GetField("a").bitfield->mask, 0xFFU);
@@ -382,6 +379,7 @@ TEST(clang_parser, bitfields)
   EXPECT_EQ(foo->GetField("c").bitfield->read_bytes, 0x2U);
   EXPECT_EQ(foo->GetField("c").bitfield->access_rshift, 0U);
   EXPECT_EQ(foo->GetField("c").bitfield->mask, 0xFFFFU);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(clang_parser, bitfields_uneven_fields)
@@ -400,10 +398,14 @@ TEST(clang_parser, bitfields_uneven_fields)
   ASSERT_TRUE(foo->HasField("d"));
   ASSERT_TRUE(foo->HasField("e"));
 
+  // clang-tidy doesn't seem to acknowledge that ASSERT_*() will
+  // return from function so that these are in fact checked accesses.
+  //
+  // NOLINTBEGIN(bugprone-unchecked-optional-access)
   EXPECT_TRUE(foo->GetField("a").type.IsIntTy());
   EXPECT_EQ(foo->GetField("a").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("a").offset, 0);
-  EXPECT_TRUE(foo->GetField("a").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("a").bitfield.has_value());
   EXPECT_EQ(foo->GetField("a").bitfield->read_bytes, 1U);
   EXPECT_EQ(foo->GetField("a").bitfield->access_rshift, 0U);
   EXPECT_EQ(foo->GetField("a").bitfield->mask, 0x1U);
@@ -411,7 +413,7 @@ TEST(clang_parser, bitfields_uneven_fields)
   EXPECT_TRUE(foo->GetField("b").type.IsIntTy());
   EXPECT_EQ(foo->GetField("b").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("b").offset, 0);
-  EXPECT_TRUE(foo->GetField("b").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("b").bitfield.has_value());
   EXPECT_EQ(foo->GetField("b").bitfield->read_bytes, 1U);
   EXPECT_EQ(foo->GetField("b").bitfield->access_rshift, 1U);
   EXPECT_EQ(foo->GetField("b").bitfield->mask, 0x1U);
@@ -419,7 +421,7 @@ TEST(clang_parser, bitfields_uneven_fields)
   EXPECT_TRUE(foo->GetField("c").type.IsIntTy());
   EXPECT_EQ(foo->GetField("c").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("c").offset, 0);
-  EXPECT_TRUE(foo->GetField("c").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("c").bitfield.has_value());
   EXPECT_EQ(foo->GetField("c").bitfield->read_bytes, 1U);
   EXPECT_EQ(foo->GetField("c").bitfield->access_rshift, 2U);
   EXPECT_EQ(foo->GetField("c").bitfield->mask, 0x7U);
@@ -427,7 +429,7 @@ TEST(clang_parser, bitfields_uneven_fields)
   EXPECT_TRUE(foo->GetField("d").type.IsIntTy());
   EXPECT_EQ(foo->GetField("d").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("d").offset, 0);
-  EXPECT_TRUE(foo->GetField("d").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("d").bitfield.has_value());
   EXPECT_EQ(foo->GetField("d").bitfield->read_bytes, 4U);
   EXPECT_EQ(foo->GetField("d").bitfield->access_rshift, 5U);
   EXPECT_EQ(foo->GetField("d").bitfield->mask, 0xFFFFFU);
@@ -435,10 +437,11 @@ TEST(clang_parser, bitfields_uneven_fields)
   EXPECT_TRUE(foo->GetField("e").type.IsIntTy());
   EXPECT_EQ(foo->GetField("e").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("e").offset, 3);
-  EXPECT_TRUE(foo->GetField("e").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("e").bitfield.has_value());
   EXPECT_EQ(foo->GetField("e").bitfield->read_bytes, 1U);
   EXPECT_EQ(foo->GetField("e").bitfield->access_rshift, 1U);
   EXPECT_EQ(foo->GetField("e").bitfield->mask, 0x7FU);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(clang_parser, bitfields_with_padding)
@@ -449,6 +452,10 @@ TEST(clang_parser, bitfields_with_padding)
   ASSERT_TRUE(bpftrace.structs.Has("struct Foo"));
   auto foo = bpftrace.structs.Lookup("struct Foo").lock();
 
+  // clang-tidy doesn't seem to acknowledge that ASSERT_*() will
+  // return from function so that these are in fact checked accesses.
+  //
+  // NOLINTBEGIN(bugprone-unchecked-optional-access)
   EXPECT_EQ(foo->size, 16);
   ASSERT_EQ(foo->fields.size(), 4U);
   ASSERT_TRUE(foo->HasField("pad"));
@@ -459,7 +466,7 @@ TEST(clang_parser, bitfields_with_padding)
   EXPECT_TRUE(foo->GetField("a").type.IsIntTy());
   EXPECT_EQ(foo->GetField("a").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("a").offset, 4);
-  EXPECT_TRUE(foo->GetField("a").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("a").bitfield.has_value());
   EXPECT_EQ(foo->GetField("a").bitfield->read_bytes, 4U);
   EXPECT_EQ(foo->GetField("a").bitfield->access_rshift, 0U);
   EXPECT_EQ(foo->GetField("a").bitfield->mask, 0xFFFFFFFU);
@@ -467,10 +474,11 @@ TEST(clang_parser, bitfields_with_padding)
   EXPECT_TRUE(foo->GetField("b").type.IsIntTy());
   EXPECT_EQ(foo->GetField("b").type.GetSize(), 4U);
   EXPECT_EQ(foo->GetField("b").offset, 7);
-  EXPECT_TRUE(foo->GetField("b").bitfield.has_value());
+  ASSERT_TRUE(foo->GetField("b").bitfield.has_value());
   EXPECT_EQ(foo->GetField("b").bitfield->read_bytes, 1U);
   EXPECT_EQ(foo->GetField("b").bitfield->access_rshift, 4U);
   EXPECT_EQ(foo->GetField("b").bitfield->mask, 0xFU);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(clang_parser, builtin_headers)
@@ -604,6 +612,39 @@ TEST_F(clang_parser_btf, btf)
   EXPECT_TRUE(foo2_field.type.IsPtrTy());
   EXPECT_EQ(foo2_field.type.GetPointeeTy()->GetName(), "struct Foo2");
   EXPECT_EQ(foo2_field.offset, 8);
+}
+
+TEST_F(clang_parser_btf, btf_arrays_multi_dim)
+{
+  GTEST_SKIP() << "BTF flattens multi-dimensional arrays #3082";
+
+  BPFtrace bpftrace;
+  bpftrace.parse_btf({});
+  parse("struct Foo { struct Arrays a; };", bpftrace);
+
+  ASSERT_TRUE(bpftrace.structs.Has("struct Arrays"));
+  auto arrs = bpftrace.structs.Lookup("struct Arrays").lock();
+
+  ASSERT_TRUE(arrs->HasField("multi_dim"));
+  EXPECT_TRUE(arrs->GetField("multi_dim").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("multi_dim").offset, 40);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetSize(), 24U);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetNumElements(), 3);
+
+  EXPECT_TRUE(arrs->GetField("multi_dim").type.GetElementTy()->IsArrayTy());
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetElementTy()->GetSize(), 8U);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetElementTy()->GetNumElements(),
+            2);
+
+  EXPECT_TRUE(arrs->GetField("multi_dim")
+                  .type.GetElementTy()
+                  ->GetElementTy()
+                  ->IsIntTy());
+  EXPECT_EQ(arrs->GetField("multi_dim")
+                .type.GetElementTy()
+                ->GetElementTy()
+                ->GetSize(),
+            4U);
 }
 
 TEST(clang_parser, btf_unresolved_typedef)
@@ -764,6 +805,4 @@ struct _tracepoint_irq_irq_handler_entry
   EXPECT_EQ(s->GetField("name").type.GetIntBitWidth(), 64ULL);
 }
 
-} // namespace clang_parser
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::clang_parser

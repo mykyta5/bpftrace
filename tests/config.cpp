@@ -4,8 +4,7 @@
 #include "gtest/gtest.h"
 #include <iostream>
 
-namespace bpftrace {
-namespace test {
+namespace bpftrace::test {
 
 TEST(Config, get_and_set)
 {
@@ -52,6 +51,10 @@ TEST(Config, get_and_set)
   EXPECT_TRUE(config_setter.set(UserSymbolCacheType::per_program));
   EXPECT_EQ(config.get(ConfigKeyUserSymbolCacheType::default_),
             UserSymbolCacheType::per_program);
+
+  EXPECT_TRUE(config_setter.set(ConfigMissingProbes::ignore));
+  EXPECT_EQ(config.get(ConfigKeyMissingProbes::default_),
+            ConfigMissingProbes::ignore);
 }
 
 TEST(Config, get_config_key)
@@ -93,6 +96,19 @@ TEST(ConfigSetter, set_user_symbol_cache_type)
             UserSymbolCacheType::none);
 }
 
+TEST(ConfigSetter, set_missing_probes)
+{
+  auto config = Config();
+  auto config_setter = ConfigSetter(config, ConfigSource::script);
+
+  EXPECT_EQ(config.get(ConfigKeyMissingProbes::default_),
+            ConfigMissingProbes::warn);
+  EXPECT_FALSE(config_setter.set_missing_probes_config("invalid"));
+  EXPECT_TRUE(config_setter.set_missing_probes_config("error"));
+  EXPECT_EQ(config.get(ConfigKeyMissingProbes::default_),
+            ConfigMissingProbes::error);
+}
+
 TEST(ConfigSetter, source_precedence)
 {
   auto config = Config();
@@ -117,5 +133,4 @@ TEST(ConfigSetter, same_source_cannot_set_twice)
   EXPECT_FALSE(config_setter.set(ConfigKeyInt::max_map_keys, 11));
 }
 
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test

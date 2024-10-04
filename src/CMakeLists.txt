@@ -16,7 +16,7 @@ endif()
 add_library(required_resources required_resources.cpp)
 add_dependencies(required_resources parser)
 
-add_library(runtime
+add_library(runtime STATIC
   attached_probe.cpp
   bpffeature.cpp
   bpftrace.cpp
@@ -29,13 +29,14 @@ add_library(runtime
   disasm.cpp
   dwarf_parser.cpp
   format_string.cpp
+  globalvars.cpp
   log.cpp
-  mapkey.cpp
   output.cpp
   probe_matcher.cpp
   procmon.cpp
   printf.cpp
   resolve_cgroupid.cpp
+  run_bpftrace.cpp
   struct.cpp
   tracefs.cpp
   debugfs.cpp
@@ -48,7 +49,7 @@ add_library(runtime
 # Ensure flex+bison outputs are built first
 add_dependencies(runtime parser)
 
-add_library(libbpftrace
+add_library(libbpftrace STATIC
   build_info.cpp
   clang_parser.cpp
   driver.cpp
@@ -89,11 +90,15 @@ endif()
 
 # compile definitions
 
-set(KERNEL_HEADERS_DIR "" CACHE PATH "Hard-code kernel headers directory")
 if (KERNEL_HEADERS_DIR)
   MESSAGE(STATUS "Using KERNEL_HEADERS_DIR=${KERNEL_HEADERS_DIR}")
-  target_compile_definitions(runtime PUBLIC KERNEL_HEADERS_DIR="${KERNEL_HEADERS_DIR}")
 endif()
+target_compile_definitions(runtime PUBLIC KERNEL_HEADERS_DIR="${KERNEL_HEADERS_DIR}")
+
+if (NOT SYSTEM_INCLUDE_PATHS EQUAL "auto")
+  MESSAGE(STATUS "Using SYSTEM_INCLUDE_PATHS=${SYSTEM_INCLUDE_PATHS}")
+endif()
+target_compile_definitions(runtime PUBLIC SYSTEM_INCLUDE_PATHS="${SYSTEM_INCLUDE_PATHS}")
 
 # This is run on every build to ensure the version string is always up-to-date
 add_custom_target(version_h
@@ -125,6 +130,10 @@ endif(STATIC_LINKING)
 
 target_link_libraries(runtime ${LIBBPF_LIBRARIES} ${ZLIB_LIBRARIES})
 target_link_libraries(libbpftrace parser resources runtime aot ast arch cxxdemangler_llvm)
+
+if(LLDB_FOUND)
+  target_link_libraries(runtime LLDB)
+endif(LLDB_FOUND)
 
 if(LIBPCAP_FOUND)
   target_link_libraries(libbpftrace ${LIBPCAP_LIBRARIES})
@@ -172,44 +181,17 @@ if(STATIC_LINKING)
   target_link_libraries(runtime ${LIBBPF_LIBRARIES})
   target_link_libraries(runtime ${LIBBCC_LOADER_LIBRARY_STATIC})
 
+  find_package(LibLzma)
+  add_library(LIBLZMA STATIC IMPORTED)
+  set_property(TARGET LIBLZMA PROPERTY IMPORTED_LOCATION ${LIBLZMA_LIBRARIES})
+  target_link_libraries(runtime LIBLZMA)
+
   add_library(LIBELF STATIC IMPORTED)
   set_property(TARGET LIBELF PROPERTY IMPORTED_LOCATION ${LIBELF_LIBRARIES})
   target_link_libraries(runtime LIBELF)
 else()
   target_link_libraries(runtime ${LIBELF_LIBRARIES})
 endif(STATIC_LINKING)
-
-if (LIBDW_FOUND)
-  if(STATIC_LINKING)
-    find_package(LibBz2)
-    find_package(LibLzma)
-    find_package(LibEbl)
-
-    add_library(LIBBZ2 STATIC IMPORTED)
-    set_property(TARGET LIBBZ2 PROPERTY IMPORTED_LOCATION ${LIBBZ2_LIBRARIES})
-
-    add_library(LIBLZMA STATIC IMPORTED)
-    set_property(TARGET LIBLZMA PROPERTY IMPORTED_LOCATION ${LIBLZMA_LIBRARIES})
-
-    add_library(LIBDW STATIC IMPORTED)
-    set_property(TARGET LIBDW PROPERTY IMPORTED_LOCATION ${LIBDW_LIBRARIES})
-
-    set(LIBDW_LIBS LIBBZ2 LIBELF LIBLZMA)
-
-    if (${LIBEBL_FOUND})
-      # libebl is not necessary on some systems (e.g. Alpine)
-      add_library(LIBEBL STATIC IMPORTED)
-      set_property(TARGET LIBEBL PROPERTY IMPORTED_LOCATION ${LIBEBL_LIBRARIES})
-      set(LIBDW_LIBS ${LIBDW_LIBS} LIBEBL)
-    endif()
-
-    target_link_libraries(LIBDW INTERFACE ${LIBDW_LIBS})
-
-    target_link_libraries(runtime LIBDW)
-  else()
-    target_link_libraries(runtime ${LIBDW_LIBRARIES})
-  endif()
-endif()
 
 # Support for std::filesystem
 # GCC version <9 and Clang (all versions) require -lstdc++fs
@@ -243,6 +225,10 @@ if (STATIC_LINKING)
     target_link_libraries(runtime "-Wl,-Bdynamic" "-lrt" "-lpthread" "-ldl" "-lm")
     target_link_libraries(runtime "-Wl,-Bstatic" "-lz")
   endif()
+endif()
+
+if (ENABLE_SYSTEMD)
+  target_link_libraries(runtime PkgConfig::libsystemd)
 endif()
 
 unset(MAIN_SRC)

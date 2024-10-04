@@ -144,47 +144,55 @@ NAME it only lists probes in the program
 RUN {{BPFTRACE}} -l -e 'kfunc:vmlinux:vfs_read { exit(); }'
 EXPECT kfunc:vmlinux:vfs_read
 EXPECT_NONE kfunc:vmlinux:vfs_write
-TIMEOUT 5
 
 NAME it lists uprobes in the program
 RUN {{BPFTRACE}} -l -e 'uretprobe:*:uprobeFunction* { exit(); }' -p {{BEFORE_PID}}
 EXPECT_REGEX uretprobe:[\S]+uprobe_test:uprobeFunction1
-TIMEOUT 5
 BEFORE ./testprogs/uprobe_test
 
 NAME it lists multiple probes in the program
 RUN {{BPFTRACE}} -l -e 'hardware:cache-misses:10 { exit(); } tracepoint:xdp:mem_connect { exit(); }'
 EXPECT hardware:cache-misses:
 EXPECT tracepoint:xdp:mem_connect
-TIMEOUT 5
 
-NAME errors on invalid character in search expression
-RUN {{BPFTRACE}} -l '\n'
-EXPECT stdin:1:1-2: ERROR: invalid character '\'
+NAME it lists struct definitions
+RUN {{BPFTRACE}} -lv 'struct task_struct'
+EXPECT struct task_struct {
+TIMEOUT 2
+
+NAME it lists probes in a given file
+RUN {{BPFTRACE}} -l runtime/scripts/interval_order.bt
+EXPECT interval:ms:
+EXPECT interval:ms:
+EXPECT interval:ms:
+
+NAME warning on non existent file
+RUN {{BPFTRACE}} -l non_existent_file.bt
+EXPECT WARNING: It appears that 'non_existent_file.bt' is a filename but the file does not exist. Treating 'non_existent_file.bt' as a search pattern.
 TIMEOUT 1
 WILL_FAIL
 
 NAME pid fails validation with leading non-number
 RUN {{BPFTRACE}} -p a1111 file.bt
-EXPECT ERROR: pid 'a1111' is not a valid decimal number
+EXPECT ERROR: Failed to parse pid: pid 'a1111' is not a valid decimal number
 TIMEOUT 1
 WILL_FAIL
 
 NAME pid fails validation with non-number in between
 RUN {{BPFTRACE}} -p 111a1 file.bt
-EXPECT ERROR: pid '111a1' is not a valid decimal number
+EXPECT ERROR: Failed to parse pid: pid '111a1' is not a valid decimal number
 TIMEOUT 1
 WILL_FAIL
 
 NAME pid fails validation with non-numeric argument
 RUN {{BPFTRACE}} -p not_a_pid file.bt
-EXPECT ERROR: pid 'not_a_pid' is not a valid decimal number
+EXPECT ERROR: Failed to parse pid: pid 'not_a_pid' is not a valid decimal number
 TIMEOUT 1
 WILL_FAIL
 
 NAME pid outside of valid pid range
 RUN {{BPFTRACE}} -p 5000000 file.bt
-EXPECT ERROR: pid '5000000' out of valid pid range [1,4194304]
+EXPECT ERROR: Failed to parse pid: pid '5000000' out of valid pid range [1,4194304]
 TIMEOUT 1
 WILL_FAIL
 
@@ -216,19 +224,19 @@ EXPECT @: 0
 TIMEOUT 1
 
 NAME delete map
-PROG BEGIN { @ = 1; @a[1] = 1; delete(@); delete(@a[1]); printf("ok\n"); exit(); }
+PROG BEGIN { @ = 1; @a[1] = 1; @b[1, 2] = 2; delete(@); delete(@a, 1); delete(@b, (1, 2)); printf("ok\n"); exit(); }
 EXPECT ok
 TIMEOUT 1
 
-NAME delete multiple-map
+NAME delete count-map
+PROG BEGIN { @ = count(); @a[1] = count(); delete(@); delete(@a, 1); exit(); }
+EXPECT @: 0
+TIMEOUT 1
+
+NAME delete multiple-map deprecated
 PROG BEGIN { @ = 1; @a[1] = 1; delete(@, @a[1]); exit(); }
 EXPECT_NONE @: 1
 EXPECT_NONE @a[1]: 1
-TIMEOUT 1
-
-NAME delete count-map
-PROG BEGIN { @ = count(); @a[1] = count(); delete(@); delete(@a[1]); exit(); }
-EXPECT @: 0
 TIMEOUT 1
 
 NAME increment/decrement map
@@ -259,7 +267,6 @@ TIMEOUT 1
 NAME basic while loop
 PROG BEGIN { $a = 0; while ($a <= 100) { @=avg($a++) } exit(); }
 EXPECT @: 50
-TIMEOUT 5
 REQUIRES_FEATURE loop
 
 NAME disable warnings
@@ -273,3 +280,23 @@ PROG BEGIN { print(kaddr("asdfzzzzzzz")) }
 EXPECT ERROR: Failed to compile: Failed to resolve kernel symbol: asdfzzzzzzz
 TIMEOUT 1
 WILL_FAIL
+
+NAME variable strings are memset
+PROG BEGIN { $x = "xxxxx"; $x = "a"; @[$x] = 1; $y = "yyyyy"; $y = "a"; @[$y] = 1; printf("len: %d\n", len(@)); exit(); }
+EXPECT len: 1
+TIMEOUT 1
+
+NAME map strings are memset
+PROG BEGIN { @x = "xxxxx"; @x = "a"; @[@x] = 1; @y = "yyyyy"; @y = "a"; @[@y] = 1; printf("len: %d\n", len(@)); exit(); }
+EXPECT len: 1
+TIMEOUT 1
+
+NAME print_per_cpu_map_vals
+PROG BEGIN { @a = avg(5); @c = count(); @s = sum(5); @mn = min(1); @mx = max(-1); print((@a, @c, @s, @mn, @mx)); exit(); }
+EXPECT (5, 1, 5, 1, -1)
+TIMEOUT 3
+
+NAME print large int
+PROG BEGIN { $a = 10223372036854775807; print(($a)); exit(); }
+EXPECT 10223372036854775807
+TIMEOUT 1

@@ -1,8 +1,7 @@
 #include "return_path_analyser.h"
 #include "log.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 ReturnPathAnalyser::ReturnPathAnalyser(Node *root, std::ostream &out)
     : root_(root), out_(out)
@@ -11,7 +10,7 @@ ReturnPathAnalyser::ReturnPathAnalyser(Node *root, std::ostream &out)
 
 bool ReturnPathAnalyser::visit(Program &prog)
 {
-  for (Subprog *subprog : *prog.functions) {
+  for (Subprog *subprog : prog.functions) {
     if (!visit(*subprog))
       return false;
   }
@@ -23,11 +22,11 @@ bool ReturnPathAnalyser::visit(Subprog &subprog)
   if (subprog.return_type.IsVoidTy())
     return true;
 
-  for (Statement *stmt : *subprog.stmts) {
+  for (Statement *stmt : subprog.stmts) {
     if (Visit(*stmt))
       return true;
   }
-  LOG(ERROR, subprog.loc, err_) << "Not all code paths return a value";
+  LOG(ERROR, subprog.loc, err_) << "Not all code paths returned a value";
   return false;
 }
 
@@ -39,7 +38,7 @@ bool ReturnPathAnalyser::visit(Jump &jump)
 bool ReturnPathAnalyser::visit(If &if_stmt)
 {
   bool result = false;
-  for (Statement *stmt : *if_stmt.stmts) {
+  for (Statement *stmt : if_stmt.stmts) {
     if (Visit(*stmt))
       result = true;
   }
@@ -48,19 +47,14 @@ bool ReturnPathAnalyser::visit(If &if_stmt)
     return false;
   }
 
-  if (if_stmt.else_stmts) {
-    for (Statement *stmt : *if_stmt.else_stmts) {
-      if (Visit(*stmt)) {
-        // both blocks have a return
-        return true;
-      }
+  for (Statement *stmt : if_stmt.else_stmts) {
+    if (Visit(*stmt)) {
+      // both blocks have a return
+      return true;
     }
-    // else block has no return
-    return false;
-  } else {
-    // if without else always requires another return in the code after it
-    return false;
   }
+  // else block has no return (or there is no else block)
+  return false;
 }
 
 bool ReturnPathAnalyser::default_visitor(__attribute__((unused)) Node &node)
@@ -90,5 +84,4 @@ Pass CreateReturnPathPass()
   return Pass("ReturnPath", fn);
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

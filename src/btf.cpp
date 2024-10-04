@@ -6,7 +6,9 @@
 #include "tracefs.h"
 #include "types.h"
 #include "utils.h"
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -49,16 +51,19 @@ BTF::BTF(const std::set<std::string> &modules) : state(NODATA)
     btf_objects.push_back(
         BTFObj{ .btf = btf__parse_raw(path), .id = 0, .name = "" });
     vmlinux_btf = btf_objects.back().btf;
+    if (!vmlinux_btf) {
+      LOG(WARNING) << "BTF: failed to parse BTF from " << path;
+      return;
+    }
   } else
     load_kernel_btfs(modules);
 
   if (btf_objects.empty()) {
-    if (bt_debug != DebugLevel::kNone)
-      LOG(ERROR) << "BTF: failed to find BTF data";
+    LOG(V1) << "BTF: failed to find BTF data";
     return;
   }
 
-  vmlinux_btf_size = (__s32)type_cnt(vmlinux_btf);
+  vmlinux_btf_size = static_cast<__s32>(type_cnt(vmlinux_btf));
 
   state = OK;
 }
@@ -73,8 +78,7 @@ void BTF::load_kernel_btfs(const std::set<std::string> &modules)
 {
   vmlinux_btf = btf__load_vmlinux_btf();
   if (libbpf_get_error(vmlinux_btf)) {
-    if (bt_debug != DebugLevel::kNone)
-      LOG(ERROR) << "BTF: failed to find BTF data for vmlinux, errno " << errno;
+    LOG(V1) << "BTF: failed to find BTF data for vmlinux, errno " << errno;
     return;
   }
   btf_objects.push_back(
@@ -89,31 +93,29 @@ void BTF::load_kernel_btfs(const std::set<std::string> &modules)
   while (true) {
     int err = bpf_btf_get_next_id(id, &id);
     if (err) {
-      if (errno != ENOENT && bt_debug != DebugLevel::kNone)
-        LOG(WARNING) << "BTF: failed to iterate modules BTF objects";
+      if (errno != ENOENT)
+        LOG(V1) << "BTF: failed to iterate modules BTF objects";
       break;
     }
 
     // Get BTF object FD
     int fd = bpf_btf_get_fd_by_id(id);
     if (fd < 0) {
-      if (bt_debug != DebugLevel::kNone)
-        LOG(WARNING) << "BTF: failed to get FD for object with id " << id;
+      LOG(V1) << "BTF: failed to get FD for object with id " << id;
       continue;
     }
 
     // Get BTF object info - needed to determine if this is a kernel module BTF
     char name[64];
     struct bpf_btf_info info = {};
-    info.name = (__u64)name;
+    info.name = reinterpret_cast<uintptr_t>(name);
     info.name_len = sizeof(name);
 
     __u32 info_len = sizeof(info);
     err = bpf_obj_get_info_by_fd(fd, &info, &info_len);
     close(fd); // close the FD not to leave too many files open
     if (err) {
-      if (bt_debug != DebugLevel::kNone)
-        LOG(WARNING) << "BTF: failed to get info for object with id " << id;
+      LOG(V1) << "BTF: failed to get info for object with id " << id;
       continue;
     }
 
@@ -198,7 +200,7 @@ std::string BTF::dump_defs_from_btf(
     return std::string("");
   }
 
-  __s32 id, max = (__s32)type_cnt(btf);
+  __s32 id, max = static_cast<__s32>(type_cnt(btf));
 
   // note that we're always iterating from 1 here as we need to go through the
   // vmlinux BTF entries, too (even for kernel module BTFs)
@@ -351,6 +353,21 @@ const struct btf_type *BTF::btf_type_skip_modifiers(const struct btf_type *t,
   return t;
 }
 
+__u32 BTF::get_type_tags(std::unordered_set<std::string> &tags,
+                         const BTFId &btf_id) const
+{
+  __u32 id = btf_id.id;
+  const struct btf_type *t = btf__type_by_id(btf_id.btf, btf_id.id);
+
+  while (t && btf_is_type_tag(t)) {
+    tags.insert(btf_str(btf_id.btf, t->name_off));
+    id = t->type;
+    t = btf__type_by_id(btf_id.btf, t->type);
+  }
+
+  return id;
+}
+
 SizedType BTF::get_stype(const BTFId &btf_id, bool resolve_structs)
 {
   const struct btf_type *t = btf__type_by_id(btf_id.btf, btf_id.id);
@@ -378,9 +395,12 @@ SizedType BTF::get_stype(const BTFId &btf_id, bool resolve_structs)
     if (resolve_structs)
       resolve_fields(stype);
   } else if (btf_is_ptr(t)) {
-    // t->type is the pointee type
+    const BTFId pointee_btf_id = { .btf = btf_id.btf, .id = t->type };
+    std::unordered_set<std::string> tags;
+    auto id = get_type_tags(tags, pointee_btf_id);
     stype = CreatePointer(
-        get_stype(BTFId{ .btf = btf_id.btf, .id = t->type }, false));
+        get_stype(BTFId{ .btf = btf_id.btf, .id = id }, false));
+    stype.SetBtfTypeTags(std::move(tags));
   } else if (btf_is_array(t)) {
     auto *array = btf_array(t);
     const auto &elem_type = get_stype(
@@ -395,35 +415,45 @@ SizedType BTF::get_stype(const BTFId &btf_id, bool resolve_structs)
   return stype;
 }
 
-Struct BTF::resolve_args(const std::string &func, bool ret)
+std::optional<Struct> BTF::resolve_args(const std::string &func,
+                                        bool ret,
+                                        std::string &err)
 {
-  if (!has_data())
-    throw std::runtime_error("BTF data not available");
+  if (!has_data()) {
+    err = "BTF data not available";
+    return std::nullopt;
+  }
 
   auto func_id = find_id(func, BTF_KIND_FUNC);
-  if (!func_id.btf)
-    throw std::runtime_error("no BTF data for " + func);
+  if (!func_id.btf) {
+    err = "no BTF data for " + func;
+    return std::nullopt;
+  }
 
   const struct btf_type *t = btf__type_by_id(func_id.btf, func_id.id);
   t = btf__type_by_id(func_id.btf, t->type);
-  if (!t || !btf_is_func_proto(t))
-    throw std::runtime_error(func + " is not a function");
+  if (!t || !btf_is_func_proto(t)) {
+    err = func + " is not a function";
+    return std::nullopt;
+  }
 
   if (bpftrace_ && !bpftrace_->is_traceable_func(func)) {
-    if (bpftrace_->get_traceable_funcs().empty())
-      throw std::runtime_error("could not read traceable functions from " +
-                               tracefs::available_filter_functions() +
-                               " (is tracefs mounted?)");
-    else
-      throw std::runtime_error("function not traceable (probably it is "
-                               "inlined or marked as \"notrace\")");
+    if (bpftrace_->get_traceable_funcs().empty()) {
+      err = "could not read traceable functions from " +
+            tracefs::available_filter_functions() + " (is tracefs mounted?)";
+    } else {
+      err = "function not traceable (probably it is "
+            "inlined or marked as \"notrace\")";
+    }
+    return std::nullopt;
   }
 
   const struct btf_param *p = btf_params(t);
   __u16 vlen = btf_vlen(t);
   if (vlen > arch::max_arg() + 1) {
-    throw std::runtime_error("functions with more than 6 parameters are "
-                             "not supported.");
+    err = "functions with more than 6 parameters are "
+          "not supported.";
+    return std::nullopt;
   }
 
   Struct args(0, false);
@@ -432,8 +462,10 @@ Struct BTF::resolve_args(const std::string &func, bool ret)
   __u32 type_size = 0;
   for (; j < vlen; j++, p++) {
     const char *str = btf_str(func_id.btf, p->name_off);
-    if (!str)
-      throw std::runtime_error("failed to resolve arguments");
+    if (!str) {
+      err = "failed to resolve arguments";
+      return std::nullopt;
+    }
 
     SizedType stype = get_stype(BTFId{ .btf = func_id.btf, .id = p->type });
     stype.funcarg_idx = arg_idx;
@@ -444,7 +476,7 @@ Struct BTF::resolve_args(const std::string &func, bool ret)
     // funcarg_idx to access them in codegen.
     type_size = btf__resolve_size(func_id.btf, p->type);
     args.size += type_size;
-    arg_idx += std::ceil((float)type_size / (float)8);
+    arg_idx += std::ceil(static_cast<float>(type_size) / static_cast<float>(8));
   }
 
   if (ret) {
@@ -461,7 +493,7 @@ Struct BTF::resolve_args(const std::string &func, bool ret)
 std::string BTF::get_all_funcs_from_btf(const BTFObj &btf_obj) const
 {
   std::string funcs;
-  __s32 id, max = (__s32)type_cnt(btf_obj.btf);
+  __s32 id, max = static_cast<__s32>(type_cnt(btf_obj.btf));
 
   for (id = start_id(btf_obj.btf); id <= max; id++) {
     const struct btf_type *t = btf__type_by_id(btf_obj.btf, id);
@@ -478,8 +510,7 @@ std::string BTF::get_all_funcs_from_btf(const BTFObj &btf_obj) const
     t = btf__type_by_id(btf_obj.btf, t->type);
     if (!t || !btf_is_func_proto(t)) {
       /* bad.. */
-      if (!bt_verbose)
-        LOG(ERROR) << func_name << " function does not have FUNC_PROTO record";
+      LOG(ERROR) << func_name << " function does not have FUNC_PROTO record";
       break;
     }
 
@@ -507,7 +538,7 @@ std::map<std::string, std::vector<std::string>> BTF::get_params_from_btf(
     const BTFObj &btf_obj,
     const std::set<std::string> &funcs) const
 {
-  __s32 id, max = (__s32)type_cnt(btf_obj.btf);
+  __s32 id, max = static_cast<__s32>(type_cnt(btf_obj.btf));
   std::string type = std::string("");
   struct btf_dump *dump;
   char err_buf[256];
@@ -541,16 +572,11 @@ std::map<std::string, std::vector<std::string>> BTF::get_params_from_btf(
     if (!t)
       continue;
 
-    _Pragma("GCC diagnostic push")
-        _Pragma("GCC diagnostic ignored \"-Wmissing-field-initializers\"")
+    BPFTRACE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts,
+                         decl_opts,
+                         .field_name = "");
 
-            DECLARE_LIBBPF_OPTS(btf_dump_emit_type_decl_opts,
-                                decl_opts,
-                                .field_name = "");
-
-    _Pragma("GCC diagnostic pop")
-
-        const struct btf_param *p;
+    const struct btf_param *p;
     int j;
 
     for (j = 0, p = btf_params(t); j < btf_vlen(t); j++, p++) {
@@ -612,7 +638,7 @@ std::map<std::string, std::vector<std::string>> BTF::get_params(
 std::set<std::string> BTF::get_all_structs_from_btf(const struct btf *btf) const
 {
   std::set<std::string> struct_set;
-  __s32 id, max = (__s32)type_cnt(btf);
+  __s32 id, max = static_cast<__s32>(type_cnt(btf));
   std::string types = std::string("");
   struct btf_dump *dump;
   char err_buf[256];
@@ -692,7 +718,7 @@ std::unordered_set<std::string> BTF::get_all_iters_from_btf(
   // kernel commit 6fcd486b3a0a("bpf: Refactor RCU enforcement in the
   // verifier.") add 'struct bpf_iter__task__safe_trusted'
   const std::string suffix___safe_trusted = "__safe_trusted";
-  __s32 id, max = (__s32)type_cnt(btf);
+  __s32 id, max = static_cast<__s32>(type_cnt(btf));
   for (id = start_id(btf); id <= max; id++) {
     const struct btf_type *t = btf__type_by_id(btf, id);
 
@@ -724,10 +750,7 @@ std::unordered_set<std::string> BTF::get_all_iters() const
   return iters;
 }
 
-// Retrieves BTF id of the given function and the FD of the BTF object
-// containing it
-std::pair<int, int> BTF::get_btf_id_fd(const std::string &func,
-                                       const std::string &mod) const
+int BTF::get_btf_id(std::string_view func, std::string_view mod) const
 {
   for (auto &btf_obj : btf_objects) {
     if (!mod.empty() && mod != btf_obj.name)
@@ -735,10 +758,10 @@ std::pair<int, int> BTF::get_btf_id_fd(const std::string &func,
 
     auto id = find_id_in_btf(btf_obj.btf, func, BTF_KIND_FUNC);
     if (id >= 0)
-      return { id, btf_obj.id ? bpf_btf_get_fd_by_id(btf_obj.id) : 0 };
+      return id;
   }
 
-  return { -1, -1 };
+  return -1;
 }
 
 BTF::BTFId BTF::find_id(const std::string &name,
@@ -748,17 +771,19 @@ BTF::BTFId BTF::find_id(const std::string &name,
     __s32 id = kind ? btf__find_by_name_kind(btf_obj.btf, name.c_str(), *kind)
                     : btf__find_by_name(btf_obj.btf, name.c_str());
     if (id >= 0)
-      return { btf_obj.btf, (__u32)id };
+      return { btf_obj.btf, static_cast<__u32>(id) };
   }
 
   return { nullptr, 0 };
 }
 
 __s32 BTF::find_id_in_btf(struct btf *btf,
-                          const std::string &name,
+                          std::string_view name,
                           std::optional<__u32> kind) const
 {
-  for (__s32 id = start_id(btf), max = (__s32)type_cnt(btf); id <= max; ++id) {
+  for (__s32 id = start_id(btf), max = static_cast<__s32>(type_cnt(btf));
+       id <= max;
+       ++id) {
     const struct btf_type *t = btf__type_by_id(btf, id);
     if (!t)
       continue;

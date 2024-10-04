@@ -29,10 +29,8 @@ Appropriate language features for this include:
 * `int`
 * `bool`
 
-If an error is **not** recoverable, prefer throwing an exception. Broadly
-speaking, if you want to immediately terminate and show a message to the
-user, use an exception. Exceptions **should not** be used for recoverable
-errors.
+If an error is **not** recoverable, prefer throwing `FatalUserException`.
+Exceptions **should not** be used for recoverable errors.
 
 ### Examples
 
@@ -89,3 +87,21 @@ struct Bar {
   int tailing_;        // bad
 };
 ```
+
+## Log Messages
+
+Below are details about when to use each kind of log level:
+
+- `DEBUG`: log info regardless of log level; like using stdout (comes with file
+and line number)
+- `V1`: log info only if verbose logging is enabled (-v); use this (among
+  others) for printing warnings which may occur on every bpftrace execution
+  (like BTF is not available)
+- `WARNING`: log info that might affect bpftrace behavior or output but allows
+the run to continue; like using stderr
+- `ERROR`: log info to indicate that the user did something invalid, which will
+(eventually) cause bpftrace to exit (via `exit(1)`); this should primarily get
+used in main.cpp after catching `FatalUserException` from deeper parts of the
+code base
+- `BUG`: abort and log info to indicate that there is an internal/unexpected
+issue (not caused by invalid user program code or CLI use)

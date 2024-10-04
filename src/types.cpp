@@ -2,10 +2,12 @@
 #include <cassert>
 #include <iostream>
 
+#include "ast/async_event_types.h"
 #include "bpftrace.h"
 #include "log.h"
 #include "struct.h"
 #include "types.h"
+#include "utils.h"
 
 namespace bpftrace {
 
@@ -29,29 +31,74 @@ std::ostream &operator<<(std::ostream &os, ProbeType type)
 
 std::ostream &operator<<(std::ostream &os, const SizedType &type)
 {
-  if (type.IsRecordTy()) {
-    os << type.GetName();
-  } else if (type.IsPtrTy()) {
-    if (type.IsCtxAccess())
-      os << "(ctx) ";
-    os << *type.GetPointeeTy() << " *";
-  } else if (type.IsIntTy()) {
-    os << (type.is_signed_ ? "" : "unsigned ") << "int" << 8 * type.GetSize();
-  } else if (type.IsArrayTy()) {
-    os << *type.GetElementTy() << "[" << type.GetNumElements() << "]";
-  } else if (type.IsStringTy() || type.IsBufferTy()) {
-    os << type.GetTy() << "[" << type.GetSize() << "]";
-  } else if (type.IsTupleTy()) {
-    os << "(";
-    size_t n = type.GetFieldCount();
-    for (size_t i = 0; i < n; ++i) {
-      os << type.GetField(i).type;
-      if (i != n - 1)
-        os << ",";
+  switch (type.GetTy()) {
+    case Type::integer: {
+      os << (type.is_signed_ ? "" : "u") << "int" << 8 * type.GetSize();
+      break;
     }
-    os << ")";
-  } else {
-    os << type.GetTy();
+    case Type::inet:
+    case Type::string:
+    case Type::buffer: {
+      os << type.GetTy() << "[" << type.GetSize() << "]";
+      break;
+    }
+    case Type::pointer: {
+      if (type.IsCtxAccess())
+        os << "(ctx) ";
+      os << *type.GetPointeeTy() << " *";
+      break;
+    }
+    case Type::array: {
+      os << *type.GetElementTy() << "[" << type.GetNumElements() << "]";
+      break;
+    }
+    case Type::record: {
+      os << type.GetName();
+      break;
+    }
+    case Type::reference: {
+      os << *type.GetDereferencedTy() << " &";
+      break;
+    }
+    case Type::tuple: {
+      os << "(";
+      size_t n = type.GetFieldCount();
+      for (size_t i = 0; i < n; ++i) {
+        os << type.GetField(i).type;
+        if (i != n - 1)
+          os << ",";
+      }
+      os << ")";
+      break;
+    }
+    case Type::max_t:
+    case Type::min_t:
+    case Type::sum_t:
+    case Type::avg_t:
+    case Type::count_t:
+    case Type::stats_t: {
+      os << (type.is_signed_ ? "" : "u") << type.GetTy();
+      break;
+    }
+    case Type::mac_address:
+    case Type::kstack_t:
+    case Type::ustack_t:
+    case Type::timestamp:
+    case Type::ksym_t:
+    case Type::usym_t:
+    case Type::username:
+    case Type::probe:
+    case Type::stack_mode:
+    case Type::timestamp_mode:
+    case Type::cgroup_path_t:
+    case Type::strerror_t:
+    case Type::hist_t:
+    case Type::lhist_t:
+    case Type::none:
+    case Type::voidtype: {
+      os << type.GetTy();
+      break;
+    }
   }
 
   return os;
@@ -67,6 +114,16 @@ bool SizedType::IsSameType(const SizedType &t) const
 
   if (IsPtrTy() && t.IsPtrTy())
     return GetPointeeTy()->IsSameType(*t.GetPointeeTy());
+
+  if (IsTupleTy() && t.IsTupleTy()) {
+    if (GetFieldCount() != t.GetFieldCount())
+      return false;
+
+    for (ssize_t i = 0; i < GetFieldCount(); i++) {
+      if (!GetField(i).type.IsSameType(t.GetField(i).type))
+        return false;
+    }
+  }
 
   return type_ == t.GetTy();
 }
@@ -105,10 +162,11 @@ bool SizedType::operator==(const SizedType &t) const
 
 bool SizedType::IsByteArray() const
 {
-  return type_ == Type::string || type_ == Type::usym ||
-         type_ == Type::ustack || type_ == Type::inet ||
-         type_ == Type::buffer || type_ == Type::timestamp ||
-         type_ == Type::mac_address || type_ == Type::cgroup_path;
+  return type_ == Type::string || type_ == Type::usym_t ||
+         type_ == Type::kstack_t || type_ == Type::ustack_t ||
+         type_ == Type::inet || type_ == Type::buffer ||
+         type_ == Type::timestamp || type_ == Type::mac_address ||
+         type_ == Type::cgroup_path_t;
 }
 
 bool SizedType::IsAggregate() const
@@ -118,7 +176,7 @@ bool SizedType::IsAggregate() const
 
 bool SizedType::IsStack() const
 {
-  return type_ == Type::ustack || type_ == Type::kstack;
+  return type_ == Type::ustack_t || type_ == Type::kstack_t;
 }
 
 std::string addrspacestr(AddrSpace as)
@@ -129,6 +187,9 @@ std::string addrspacestr(AddrSpace as)
       break;
     case AddrSpace::user:
       return "user";
+      break;
+    case AddrSpace::bpf:
+      return "bpf";
       break;
     case AddrSpace::none:
       return "none";
@@ -141,37 +202,38 @@ std::string addrspacestr(AddrSpace as)
 std::string typestr(Type t)
 {
   switch (t) {
-    // clang-format off
+      // clang-format off
     case Type::none:     return "none";     break;
     case Type::voidtype: return "void";     break;
-    case Type::integer:  return "integer";  break;
+    case Type::integer:  return "int";  break;
     case Type::pointer:  return "pointer";  break;
+    case Type::reference:return "reference";break;
     case Type::record:   return "record";   break;
-    case Type::hist:     return "hist";     break;
-    case Type::lhist:    return "lhist";    break;
-    case Type::count:    return "count";    break;
-    case Type::sum:      return "sum";      break;
-    case Type::min:      return "min";      break;
-    case Type::max:      return "max";      break;
-    case Type::avg:      return "avg";      break;
-    case Type::stats:    return "stats";    break;
-    case Type::kstack:   return "kstack";   break;
-    case Type::ustack:   return "ustack";   break;
+    case Type::hist_t:     return "hist_t";     break;
+    case Type::lhist_t:    return "lhist_t";    break;
+    case Type::count_t:    return "count_t";    break;
+    case Type::sum_t:      return "sum_t";      break;
+    case Type::min_t:      return "min_t";      break;
+    case Type::max_t:      return "max_t";      break;
+    case Type::avg_t:      return "avg_t";      break;
+    case Type::stats_t:    return "stats_t";    break;
+    case Type::kstack_t:   return "kstack";   break;
+    case Type::ustack_t:   return "ustack";   break;
     case Type::string:   return "string";   break;
-    case Type::ksym:     return "ksym";     break;
-    case Type::usym:     return "usym";     break;
+    case Type::ksym_t:     return "ksym_t";     break;
+    case Type::usym_t:     return "usym_t";     break;
     case Type::probe:    return "probe";    break;
     case Type::username: return "username"; break;
     case Type::inet:     return "inet";     break;
-    case Type::stack_mode:return "stack mode";break;
+    case Type::stack_mode:return "stack_mode";break;
     case Type::array:    return "array";    break;
     case Type::buffer:   return "buffer";   break;
     case Type::tuple:    return "tuple";    break;
     case Type::timestamp:return "timestamp";break;
     case Type::mac_address: return "mac_address"; break;
-    case Type::cgroup_path: return "cgroup_path"; break;
-    case Type::strerror: return "strerror"; break;
-    case Type::timestamp_mode: return "timestamp mode"; break;
+    case Type::cgroup_path_t: return "cgroup_path_t"; break;
+    case Type::strerror_t: return "strerror_t"; break;
+    case Type::timestamp_mode: return "timestamp_mode"; break;
       // clang-format on
   }
 
@@ -243,24 +305,18 @@ std::string probetypeName(ProbeType t)
 
 uint64_t asyncactionint(AsyncAction a)
 {
-  return (uint64_t)a;
+  return static_cast<uint64_t>(a);
 }
 
 // Type wrappers
 SizedType CreateInteger(size_t bits, bool is_signed)
 {
-  // Zero sized integers are not usually valid. However, during semantic
-  // analysis when we're inferring types, the first pass may not have
-  // enough information to figure out the exact size of the integer. Later
-  // passes infer the exact size.
-  assert(bits == 0 || bits == 1 || bits == 8 || bits == 16 || bits == 32 ||
-         bits == 64);
   auto t = SizedType(Type::integer, 0, is_signed);
-  t.size_bits_ = bits;
+  t.SetIntBitWidth(bits);
   return t;
 }
 
-SizedType CreateBool(void)
+SizedType CreateBool()
 {
   return CreateInteger(1, false);
 }
@@ -352,6 +408,15 @@ SizedType CreatePointer(const SizedType &pointee_type, AddrSpace as)
   return ty;
 }
 
+SizedType CreateReference(const SizedType &referred_type, AddrSpace as)
+{
+  // Reference itself is always an uint64
+  auto ty = SizedType(Type::reference, 8);
+  ty.element_type_ = std::make_shared<SizedType>(referred_type);
+  ty.SetAS(as);
+  return ty;
+}
+
 SizedType CreateRecord(const std::string &name, std::weak_ptr<Struct> record)
 {
   auto ty = SizedType(Type::record, record.expired() ? 0 : record.lock()->size);
@@ -362,39 +427,41 @@ SizedType CreateRecord(const std::string &name, std::weak_ptr<Struct> record)
 
 SizedType CreateStack(bool kernel, StackType stack)
 {
-  auto st = SizedType(kernel ? Type::kstack : Type::ustack, kernel ? 8 : 16);
+  // These sizes are based on the stack key (see CodegenLLVM::kstack_ustack)
+  auto st = SizedType(kernel ? Type::kstack_t : Type::ustack_t,
+                      kernel ? 12 : 20);
   st.stack_type = stack;
   return st;
 }
 
 SizedType CreateMin(bool is_signed)
 {
-  return SizedType(Type::min, 8, is_signed);
+  return SizedType(Type::min_t, 8, is_signed);
 }
 
 SizedType CreateMax(bool is_signed)
 {
-  return SizedType(Type::max, 8, is_signed);
+  return SizedType(Type::max_t, 8, is_signed);
 }
 
 SizedType CreateSum(bool is_signed)
 {
-  return SizedType(Type::sum, 8, is_signed);
+  return SizedType(Type::sum_t, 8, is_signed);
 }
 
 SizedType CreateCount(bool is_signed)
 {
-  return SizedType(Type::count, 8, is_signed);
+  return SizedType(Type::count_t, 8, is_signed);
 }
 
 SizedType CreateAvg(bool is_signed)
 {
-  return SizedType(Type::avg, 8, is_signed);
+  return SizedType(Type::avg_t, 8, is_signed);
 }
 
 SizedType CreateStats(bool is_signed)
 {
-  return SizedType(Type::stats, 8, is_signed);
+  return SizedType(Type::stats_t, 8, is_signed);
 }
 
 SizedType CreateProbe()
@@ -416,27 +483,28 @@ SizedType CreateInet(size_t size)
 
 SizedType CreateLhist()
 {
-  return SizedType(Type::lhist, 8);
+  return SizedType(Type::lhist_t, 8);
 }
 
 SizedType CreateHist()
 {
-  return SizedType(Type::hist, 8);
+  return SizedType(Type::hist_t, 8);
 }
 
 SizedType CreateUSym()
 {
-  return SizedType(Type::usym, 24);
+  return SizedType(Type::usym_t, 24);
 }
 
 SizedType CreateKSym()
 {
-  return SizedType(Type::ksym, 8);
+  return SizedType(Type::ksym_t, 8);
 }
 
 SizedType CreateBuffer(size_t size)
 {
-  return SizedType(Type::buffer, size);
+  auto metadata_headroom_bytes = sizeof(AsyncEvent::Buf);
+  return SizedType(Type::buffer, size + metadata_headroom_bytes);
 }
 
 SizedType CreateTimestamp()
@@ -460,12 +528,12 @@ SizedType CreateMacAddress()
 
 SizedType CreateCgroupPath()
 {
-  return SizedType(Type::cgroup_path, 16);
+  return SizedType(Type::cgroup_path_t, 16);
 }
 
 SizedType CreateStrerror()
 {
-  return SizedType(Type::strerror, 8);
+  return SizedType(Type::strerror_t, 8);
 }
 
 SizedType CreateTimestampMode()
@@ -473,7 +541,7 @@ SizedType CreateTimestampMode()
   return SizedType(Type::timestamp_mode, 0);
 }
 
-bool SizedType::IsSigned(void) const
+bool SizedType::IsSigned() const
 {
   return is_signed_;
 }
@@ -488,7 +556,7 @@ Field &SizedType::GetField(ssize_t n) const
 {
   assert(IsTupleTy() || IsRecordTy());
   if (n >= GetFieldCount())
-    throw std::runtime_error("Getfield(): out of bound");
+    throw FatalUserException("Getfield(): out of bounds");
   return inner_struct_.lock()->fields[n];
 }
 
@@ -544,15 +612,39 @@ std::weak_ptr<const Struct> SizedType::GetStruct() const
   return inner_struct_;
 }
 
-// Checks if values of this type can be copied into values of another type
-// Currently checks if strings in the other type (at corresponding places) are
-// larger.
+bool SizedType::IsSameSizeRecursive(const SizedType &t) const
+{
+  if (GetSize() != t.GetSize()) {
+    return false;
+  }
+
+  if (IsTupleTy() && t.IsTupleTy()) {
+    if (GetFieldCount() != t.GetFieldCount()) {
+      return false;
+    }
+
+    for (ssize_t i = 0; i < GetFieldCount(); i++) {
+      if (!GetField(i).type.IsSameSizeRecursive(t.GetField(i).type))
+        return false;
+    }
+  }
+
+  return true;
+}
+
 bool SizedType::FitsInto(const SizedType &t) const
 {
+  if (!IsSameType(t))
+    return false;
+
   if (IsStringTy() && t.IsStringTy())
     return GetSize() <= t.GetSize();
 
-  if (IsTupleTy() && t.IsTupleTy()) {
+  if (IsIntegerTy()) {
+    return (IsSigned() == t.IsSigned()) && (GetSize() <= t.GetSize());
+  }
+
+  if (IsTupleTy()) {
     if (GetFieldCount() != t.GetFieldCount())
       return false;
 
@@ -565,6 +657,11 @@ bool SizedType::FitsInto(const SizedType &t) const
   return IsEqual(t);
 }
 
+bool SizedType::NeedsPercpuMap() const
+{
+  return IsHistTy() || IsLhistTy() || IsCountTy() || IsSumTy() || IsMinTy() ||
+         IsMaxTy() || IsAvgTy() || IsStatsTy();
+}
 } // namespace bpftrace
 
 namespace std {
@@ -581,11 +678,14 @@ size_t hash<bpftrace::SizedType>::operator()(
     case bpftrace::Type::pointer:
       bpftrace::hash_combine(hash, *type.GetPointeeTy());
       break;
+    case bpftrace::Type::reference:
+      bpftrace::hash_combine(hash, *type.GetDereferencedTy());
+      break;
     case bpftrace::Type::record:
       bpftrace::hash_combine(hash, type.GetName());
       break;
-    case bpftrace::Type::kstack:
-    case bpftrace::Type::ustack:
+    case bpftrace::Type::kstack_t:
+    case bpftrace::Type::ustack_t:
       bpftrace::hash_combine(hash, type.stack_type);
       break;
     case bpftrace::Type::array:
@@ -599,17 +699,17 @@ size_t hash<bpftrace::SizedType>::operator()(
     // a compiler warning when we add a new type
     case bpftrace::Type::none:
     case bpftrace::Type::voidtype:
-    case bpftrace::Type::hist:
-    case bpftrace::Type::lhist:
-    case bpftrace::Type::count:
-    case bpftrace::Type::sum:
-    case bpftrace::Type::min:
-    case bpftrace::Type::max:
-    case bpftrace::Type::avg:
-    case bpftrace::Type::stats:
+    case bpftrace::Type::hist_t:
+    case bpftrace::Type::lhist_t:
+    case bpftrace::Type::count_t:
+    case bpftrace::Type::sum_t:
+    case bpftrace::Type::min_t:
+    case bpftrace::Type::max_t:
+    case bpftrace::Type::avg_t:
+    case bpftrace::Type::stats_t:
     case bpftrace::Type::string:
-    case bpftrace::Type::ksym:
-    case bpftrace::Type::usym:
+    case bpftrace::Type::ksym_t:
+    case bpftrace::Type::usym_t:
     case bpftrace::Type::probe:
     case bpftrace::Type::username:
     case bpftrace::Type::inet:
@@ -617,8 +717,8 @@ size_t hash<bpftrace::SizedType>::operator()(
     case bpftrace::Type::buffer:
     case bpftrace::Type::timestamp:
     case bpftrace::Type::mac_address:
-    case bpftrace::Type::cgroup_path:
-    case bpftrace::Type::strerror:
+    case bpftrace::Type::cgroup_path_t:
+    case bpftrace::Type::strerror_t:
     case bpftrace::Type::timestamp_mode:
       break;
   }

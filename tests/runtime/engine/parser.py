@@ -4,6 +4,7 @@ from collections import namedtuple
 import os
 import platform
 
+DEFAULT_TIMEOUT = 5
 
 class RequiredFieldError(Exception):
     pass
@@ -123,11 +124,26 @@ class TestParser(object):
         will_fail = False
         new_pidns = False
         skip_if_env_has = None
+        prev_item_name = ''
 
         for item in test:
+            if item[:len(prev_item_name) + 1].isspace():
+                # Whitespace at beginning of line means it continues from the
+                # previous line
+
+                # Remove the leading whitespace and the trailing newline
+                line = item[len(prev_item_name) + 1:-1]
+                if prev_item_name == 'PROG':
+                    prog += '\n' + line
+                    continue
+                elif prev_item_name == 'EXPECT':
+                    expects[-1].expect += '\n' + line
+                    continue
+
             item_split = item.split()
             item_name = item_split[0]
             line = ' '.join(item_split[1:])
+            prev_item_name = item_name
 
             if item_name == 'NAME':
                 name = line
@@ -178,9 +194,7 @@ class TestParser(object):
                     "dpath",
                     "uprobe_refcount",
                     "signal",
-                    "iter:task",
-                    "iter:task_file",
-                    "iter:task_vma",
+                    "iter",
                     "libpath_resolv",
                     "dwarf",
                     "aot",
@@ -223,7 +237,7 @@ class TestParser(object):
         elif len(expects) > 1 and has_exact_expect:
             raise InvalidFieldError('EXPECT_JSON or EXPECT_FILE can not be used with other EXPECTs. Suite: ' + test_suite)
         elif timeout == '':
-            raise RequiredFieldError('Test TIMEOUT is required. Suite: ' + test_suite)
+            timeout = DEFAULT_TIMEOUT
 
         return TestStruct(
             name,

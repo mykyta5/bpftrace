@@ -1,16 +1,16 @@
-add_library(ast_defs ast.cpp)
+add_library(ast_defs STATIC ast.cpp)
 
-add_library(ast
+add_library(ast STATIC
   async_event_types.cpp
   attachpoint_parser.cpp
   dibuilderbpf.cpp
-  elf_parser.cpp
   int_parser.cpp
   irbuilderbpf.cpp
   pass_manager.cpp
   signal.cpp
   visitors.cpp
 
+  passes/codegen_resources.cpp
   passes/config_analyser.cpp
   passes/field_analyser.cpp
   passes/portability_analyser.cpp

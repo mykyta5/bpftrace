@@ -3,9 +3,7 @@
 #include "mocks.h"
 #include "gtest/gtest.h"
 
-namespace bpftrace {
-namespace test {
-namespace field_analyser {
+namespace bpftrace::test::field_analyser {
 
 #include "btf_common.h"
 
@@ -20,7 +18,7 @@ void test(BPFtrace &bpftrace, const std::string &input, int expected_result = 0)
   Driver driver(bpftrace);
   EXPECT_EQ(driver.parse_str(input), 0);
 
-  ast::FieldAnalyser fields(driver.root.get(), bpftrace, out);
+  ast::FieldAnalyser fields(driver.ctx.root, bpftrace, out);
   EXPECT_EQ(fields.analyse(), expected_result) << msg.str() + out.str();
 }
 
@@ -163,6 +161,9 @@ TEST_F(field_analyser_btf, btf_arrays)
   EXPECT_EQ(arrs->GetField("ptr_arr").type.GetSize(), 2 * sizeof(uintptr_t));
   EXPECT_EQ(arrs->GetField("ptr_arr").offset, 24);
 
+  // BTF flattens multi-dimensional arrays, so this test doesn't
+  // check the correct number of elements. The correct values are
+  // below in 'field_analyser_btf.btf_arrays_multi_dim'.
   EXPECT_TRUE(arrs->GetField("multi_dim").type.IsArrayTy());
   EXPECT_EQ(arrs->GetField("multi_dim").type.GetNumElements(), 6);
   EXPECT_TRUE(arrs->GetField("multi_dim").type.GetElementTy()->IsIntTy());
@@ -180,6 +181,87 @@ TEST_F(field_analyser_btf, btf_arrays)
   EXPECT_TRUE(arrs->GetField("flexible").type.GetElementTy()->IsIntTy());
   EXPECT_EQ(arrs->GetField("flexible").type.GetSize(), 0U);
   EXPECT_EQ(arrs->GetField("flexible").offset, 64);
+}
+
+TEST_F(field_analyser_btf, btf_arrays_multi_dim)
+{
+  GTEST_SKIP() << "BTF flattens multi-dimensional arrays #3082";
+
+  BPFtrace bpftrace;
+  bpftrace.parse_btf({});
+  test(bpftrace,
+       "BEGIN {\n"
+       "  @ = (struct Arrays *) 0;\n"
+       "}",
+       0);
+
+  ASSERT_TRUE(bpftrace.structs.Has("struct Arrays"));
+  auto arrs = bpftrace.structs.Lookup("struct Arrays").lock();
+
+  ASSERT_TRUE(arrs->HasField("multi_dim"));
+  EXPECT_TRUE(arrs->GetField("multi_dim").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("multi_dim").offset, 40);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetSize(), 24U);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetNumElements(), 3);
+
+  EXPECT_TRUE(arrs->GetField("multi_dim").type.GetElementTy()->IsArrayTy());
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetElementTy()->GetSize(), 8U);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetElementTy()->GetNumElements(),
+            2);
+
+  EXPECT_TRUE(arrs->GetField("multi_dim")
+                  .type.GetElementTy()
+                  ->GetElementTy()
+                  ->IsIntTy());
+  EXPECT_EQ(arrs->GetField("multi_dim")
+                .type.GetElementTy()
+                ->GetElementTy()
+                ->GetSize(),
+            4U);
+}
+
+void test_arrays_compound_data(BPFtrace &bpftrace)
+{
+  ASSERT_TRUE(bpftrace.structs.Has("struct ArrayWithCompoundData"));
+  auto arrs = bpftrace.structs.Lookup("struct ArrayWithCompoundData").lock();
+
+  EXPECT_EQ(arrs->size, 2 * sizeof(uintptr_t));
+  ASSERT_EQ(arrs->fields.size(), 1U);
+  ASSERT_TRUE(arrs->HasField("data"));
+
+  auto &data_type = arrs->GetField("data").type;
+  EXPECT_TRUE(data_type.IsArrayTy());
+  EXPECT_EQ(data_type.GetNumElements(), 2);
+  EXPECT_EQ(data_type.GetSize(), 2 * sizeof(uintptr_t));
+
+  // Check that referenced types n-levels deep are all parsed from BTF
+
+  auto &foo3_ptr_type = *data_type.GetElementTy();
+  ASSERT_TRUE(foo3_ptr_type.IsPtrTy());
+
+  auto &foo3_type = *foo3_ptr_type.GetPointeeTy();
+  ASSERT_TRUE(foo3_type.IsRecordTy());
+  ASSERT_TRUE(foo3_type.HasField("foo1"));
+
+  auto &foo1_ptr_type = foo3_type.GetField("foo1").type;
+  ASSERT_TRUE(foo1_ptr_type.IsPtrTy());
+
+  auto &foo1_type = *foo1_ptr_type.GetPointeeTy();
+  ASSERT_TRUE(foo1_type.IsRecordTy());
+  ASSERT_TRUE(foo1_type.HasField("a"));
+}
+
+TEST_F(field_analyser_btf, arrays_compound_data)
+{
+  BPFtrace bpftrace;
+  bpftrace.parse_btf({});
+  test(bpftrace,
+       "BEGIN {\n"
+       "  $x = (struct ArrayWithCompoundData *) 0;\n"
+       "  $x->data[0]->foo1->a\n"
+       "}",
+       0);
+  test_arrays_compound_data(bpftrace);
 }
 
 TEST_F(field_analyser_btf, btf_types_struct_ptr)
@@ -208,6 +290,31 @@ TEST_F(field_analyser_btf, btf_types_struct_ptr)
   ASSERT_EQ(foo3->fields.size(), 2U); // fields are resolved
 }
 
+TEST_F(field_analyser_btf, btf_types_arr_access)
+{
+  BPFtrace bpftrace;
+  bpftrace.parse_btf({});
+  test(bpftrace,
+       "kfunc:func_1 {\n"
+       "  @foo2 = args.foo3[0].foo2;\n"
+       "}",
+       0);
+
+  // args.foo3[0].foo2 should do 2 things:
+  // - add struct Foo2 (without resolving its fields)
+  // - resolve fields of struct Foo3
+
+  ASSERT_TRUE(bpftrace.structs.Has("struct Foo2"));
+  ASSERT_TRUE(bpftrace.structs.Has("struct Foo3"));
+  auto foo2 = bpftrace.structs.Lookup("struct Foo2").lock();
+  auto foo3 = bpftrace.structs.Lookup("struct Foo3").lock();
+
+  EXPECT_EQ(foo2->size, 24);
+  ASSERT_EQ(foo2->fields.size(), 0U); // fields are not resolved
+  EXPECT_EQ(foo3->size, 16);
+  ASSERT_EQ(foo3->fields.size(), 2U); // fields are resolved
+}
+
 TEST_F(field_analyser_btf, btf_types_bitfields)
 {
   BPFtrace bpftrace;
@@ -217,11 +324,15 @@ TEST_F(field_analyser_btf, btf_types_bitfields)
   ASSERT_TRUE(bpftrace.structs.Has("struct task_struct"));
   auto task_struct = bpftrace.structs.Lookup("struct task_struct").lock();
 
+  // clang-tidy doesn't seem to acknowledge that ASSERT_*() will
+  // return from function so that these are in fact checked accesses.
+  //
+  // NOLINTBEGIN(bugprone-unchecked-optional-access)
   ASSERT_TRUE(task_struct->HasField("a"));
   EXPECT_TRUE(task_struct->GetField("a").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("a").type.GetSize(), 4U);
   EXPECT_EQ(task_struct->GetField("a").offset, 9);
-  EXPECT_TRUE(task_struct->GetField("a").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("a").bitfield.has_value());
   EXPECT_EQ(task_struct->GetField("a").bitfield->read_bytes, 0x2U);
   EXPECT_EQ(task_struct->GetField("a").bitfield->access_rshift, 4U);
   EXPECT_EQ(task_struct->GetField("a").bitfield->mask, 0xFFU);
@@ -230,7 +341,7 @@ TEST_F(field_analyser_btf, btf_types_bitfields)
   EXPECT_TRUE(task_struct->GetField("b").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("b").type.GetSize(), 4U);
   EXPECT_EQ(task_struct->GetField("b").offset, 10);
-  EXPECT_TRUE(task_struct->GetField("b").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("b").bitfield.has_value());
   EXPECT_EQ(task_struct->GetField("b").bitfield->read_bytes, 0x1U);
   EXPECT_EQ(task_struct->GetField("b").bitfield->access_rshift, 4U);
   EXPECT_EQ(task_struct->GetField("b").bitfield->mask, 0x1U);
@@ -239,7 +350,7 @@ TEST_F(field_analyser_btf, btf_types_bitfields)
   EXPECT_TRUE(task_struct->GetField("c").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("c").type.GetSize(), 4U);
   EXPECT_EQ(task_struct->GetField("c").offset, 10);
-  EXPECT_TRUE(task_struct->GetField("c").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("c").bitfield.has_value());
   EXPECT_EQ(task_struct->GetField("c").bitfield->read_bytes, 0x1U);
   EXPECT_EQ(task_struct->GetField("c").bitfield->access_rshift, 5U);
   EXPECT_EQ(task_struct->GetField("c").bitfield->mask, 0x7U);
@@ -248,10 +359,11 @@ TEST_F(field_analyser_btf, btf_types_bitfields)
   EXPECT_TRUE(task_struct->GetField("d").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("d").type.GetSize(), 4U);
   EXPECT_EQ(task_struct->GetField("d").offset, 12);
-  EXPECT_TRUE(task_struct->GetField("d").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("d").bitfield.has_value());
   EXPECT_EQ(task_struct->GetField("d").bitfield->read_bytes, 0x3U);
   EXPECT_EQ(task_struct->GetField("d").bitfield->access_rshift, 0U);
   EXPECT_EQ(task_struct->GetField("d").bitfield->mask, 0xFFFFFU);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST_F(field_analyser_btf, btf_anon_union_first_in_struct)
@@ -280,7 +392,7 @@ TEST_F(field_analyser_btf, btf_anon_union_first_in_struct)
   EXPECT_EQ(record->GetField("c").offset, 4);
 }
 
-#ifdef HAVE_LIBDW
+#ifdef HAVE_LIBLLDB
 
 #include "dwarf_common.h"
 
@@ -314,6 +426,17 @@ TEST_F(field_analyser_dwarf, uprobe_args)
   test(bpftrace, uprobe + ":func_* { $x = args.a; }", 1);
 }
 
+static void CheckFieldsOrderedByOffset(const Fields &fields)
+{
+  // Check order of the fields for consistent output when printing record types.
+  EXPECT_TRUE(std::is_sorted(
+      fields.begin(), fields.end(), [](const Field &a, const Field &b) {
+        // We accept fields that have the same offset, but different names.
+        // Check first that the offsets are ordered, then the names.
+        return a.offset < b.offset || (a.offset == b.offset && a.name < b.name);
+      }));
+}
+
 TEST_F(field_analyser_dwarf, parse_struct)
 {
   BPFtrace bpftrace;
@@ -326,6 +449,7 @@ TEST_F(field_analyser_dwarf, parse_struct)
   ASSERT_TRUE(str->HasFields());
   ASSERT_EQ(str->fields.size(), 3);
   ASSERT_EQ(str->size, 16);
+  CheckFieldsOrderedByOffset(str->fields);
 
   ASSERT_TRUE(str->HasField("a"));
   ASSERT_TRUE(str->GetField("a").type.IsIntTy());
@@ -342,6 +466,274 @@ TEST_F(field_analyser_dwarf, parse_struct)
   ASSERT_EQ(str->GetField("c").type.GetSize(), 8);
 }
 
+TEST_F(field_analyser_dwarf, parse_arrays)
+{
+  BPFtrace bpftrace;
+  std::string uprobe = "uprobe:" + std::string(bin_);
+  test(bpftrace,
+       uprobe + ":func_arrays {\n"
+                "  @ = (struct Arrays *) args.arr;\n"
+                "}");
+
+  ASSERT_TRUE(bpftrace.structs.Has("struct Arrays"));
+  auto arrs = bpftrace.structs.Lookup("struct Arrays").lock();
+
+  EXPECT_EQ(arrs->size, 64);
+  ASSERT_EQ(arrs->fields.size(), 6U);
+  CheckFieldsOrderedByOffset(arrs->fields);
+
+  ASSERT_TRUE(arrs->HasField("int_arr"));
+  ASSERT_TRUE(arrs->HasField("char_arr"));
+  ASSERT_TRUE(arrs->HasField("ptr_arr"));
+  ASSERT_TRUE(arrs->HasField("multi_dim"));
+  ASSERT_TRUE(arrs->HasField("zero"));
+  ASSERT_TRUE(arrs->HasField("flexible"));
+
+  EXPECT_TRUE(arrs->GetField("int_arr").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("int_arr").type.GetNumElements(), 4);
+  EXPECT_TRUE(arrs->GetField("int_arr").type.GetElementTy()->IsIntTy());
+  EXPECT_EQ(arrs->GetField("int_arr").type.GetSize(), 16U);
+  EXPECT_EQ(arrs->GetField("int_arr").offset, 0);
+
+  EXPECT_TRUE(arrs->GetField("char_arr").type.IsStringTy());
+  EXPECT_EQ(arrs->GetField("char_arr").type.GetSize(), 8U);
+  EXPECT_EQ(arrs->GetField("char_arr").offset, 16);
+
+  EXPECT_TRUE(arrs->GetField("ptr_arr").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("ptr_arr").type.GetNumElements(), 2);
+  EXPECT_TRUE(arrs->GetField("ptr_arr").type.GetElementTy()->IsPtrTy());
+  EXPECT_EQ(arrs->GetField("ptr_arr").type.GetSize(), 2 * sizeof(uintptr_t));
+  EXPECT_EQ(arrs->GetField("ptr_arr").offset, 24);
+
+  ASSERT_TRUE(arrs->HasField("multi_dim"));
+  EXPECT_TRUE(arrs->GetField("multi_dim").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("multi_dim").offset, 40);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetSize(), 24U);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetNumElements(), 3);
+
+  EXPECT_TRUE(arrs->GetField("multi_dim").type.GetElementTy()->IsArrayTy());
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetElementTy()->GetSize(), 8U);
+  EXPECT_EQ(arrs->GetField("multi_dim").type.GetElementTy()->GetNumElements(),
+            2);
+
+  EXPECT_TRUE(arrs->GetField("multi_dim")
+                  .type.GetElementTy()
+                  ->GetElementTy()
+                  ->IsIntTy());
+  EXPECT_EQ(arrs->GetField("multi_dim")
+                .type.GetElementTy()
+                ->GetElementTy()
+                ->GetSize(),
+            4U);
+
+  EXPECT_TRUE(arrs->GetField("zero").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("zero").type.GetNumElements(), 0);
+  EXPECT_TRUE(arrs->GetField("zero").type.GetElementTy()->IsIntTy());
+  EXPECT_EQ(arrs->GetField("zero").type.GetSize(), 0U);
+  EXPECT_EQ(arrs->GetField("zero").offset, 64);
+
+  EXPECT_TRUE(arrs->GetField("flexible").type.IsArrayTy());
+  EXPECT_EQ(arrs->GetField("flexible").type.GetNumElements(), 0);
+  EXPECT_TRUE(arrs->GetField("flexible").type.GetElementTy()->IsIntTy());
+  EXPECT_EQ(arrs->GetField("flexible").type.GetSize(), 0U);
+  EXPECT_EQ(arrs->GetField("flexible").offset, 64);
+}
+
+TEST_F(field_analyser_dwarf, arrays_compound_data)
+{
+  BPFtrace bpftrace;
+  test(bpftrace,
+       "uprobe:" + std::string{ bin_ } +
+           ":func_array_with_compound_data {\n"
+           "  args.arr->data[0]->foo1->a;\n"
+           "}",
+       0);
+  test_arrays_compound_data(bpftrace);
+}
+
+static void CheckParentFields(const std::shared_ptr<Struct> &cls,
+                              bool is_d_shadowed = false)
+{
+  EXPECT_TRUE(cls->HasField("a"));
+  EXPECT_TRUE(cls->GetField("a").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("a").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("a").offset, 0);
+
+  EXPECT_TRUE(cls->HasField("b"));
+  EXPECT_TRUE(cls->GetField("b").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("b").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("b").offset, 4);
+
+  EXPECT_TRUE(cls->HasField("c"));
+  EXPECT_TRUE(cls->GetField("c").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("c").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("c").offset, 8);
+
+  // The Child class also has a field 'd', which shadows the Parent's.
+  if (!is_d_shadowed) {
+    EXPECT_TRUE(cls->HasField("d"));
+    EXPECT_TRUE(cls->GetField("d").type.IsIntTy());
+    EXPECT_EQ(cls->GetField("d").type.GetSize(), 4);
+    EXPECT_EQ(cls->GetField("d").offset, 12);
+  }
+}
+
+static void CheckChildFields(const std::shared_ptr<Struct> &cls)
+{
+  CheckParentFields(cls, true);
+
+  // Child::d masks Parent::d
+  EXPECT_TRUE(cls->HasField("d"));
+  EXPECT_TRUE(cls->GetField("d").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("d").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("d").offset, 16);
+
+  EXPECT_TRUE(cls->HasField("e"));
+  EXPECT_TRUE(cls->GetField("e").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("e").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("e").offset, 20);
+
+  EXPECT_TRUE(cls->HasField("f"));
+  EXPECT_TRUE(cls->GetField("f").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("f").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("f").offset, 24);
+}
+
+static void CheckGrandChildFields(const std::shared_ptr<Struct> &cls)
+{
+  CheckChildFields(cls);
+
+  EXPECT_TRUE(cls->HasField("g"));
+  EXPECT_TRUE(cls->GetField("g").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("g").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("g").offset, 28);
+}
+
+TEST_F(field_analyser_dwarf, parse_class)
+{
+  BPFtrace bpftrace;
+  std::string uprobe = "uprobe:" + std::string(cxx_bin_);
+  test(bpftrace, uprobe + ":cpp:func_1 { $x = args.p->a; }", 0);
+
+  ASSERT_TRUE(bpftrace.structs.Has("Parent"));
+  auto cls = bpftrace.structs.Lookup("Parent").lock();
+
+  ASSERT_TRUE(cls->HasFields());
+  EXPECT_EQ(cls->fields.size(), 4);
+  EXPECT_EQ(cls->size, 16);
+  CheckFieldsOrderedByOffset(cls->fields);
+
+  CheckParentFields(cls);
+}
+
+TEST_F(field_analyser_dwarf, parse_inheritance)
+{
+  BPFtrace bpftrace;
+  std::string uprobe = "uprobe:" + std::string(cxx_bin_);
+  test(bpftrace, uprobe + ":cpp:func_1 { $x = args.c->a; }", 0);
+
+  ASSERT_TRUE(bpftrace.structs.Has("Child"));
+  auto cls = bpftrace.structs.Lookup("Child").lock();
+
+  ASSERT_TRUE(cls->HasFields());
+  // The Child class has a total of 7 fields:
+  //   Parent: a, b, c, d
+  //   Child: d, e, f
+  // Child::d masks Parent::d, so only 6 fields are listed.
+  ASSERT_EQ(cls->fields.size(), (4 - 1) + 3);
+  ASSERT_EQ(cls->size, 16 + 12);
+  CheckFieldsOrderedByOffset(cls->fields);
+
+  CheckChildFields(cls);
+}
+
+TEST_F(field_analyser_dwarf, parse_inheritance_chain)
+{
+  BPFtrace bpftrace;
+  std::string uprobe = "uprobe:" + std::string(cxx_bin_);
+  test(bpftrace, uprobe + ":cpp:func_2 { $x = args.lc->a; }", 0);
+
+  ASSERT_TRUE(bpftrace.structs.Has("GrandChild"));
+  auto cls = bpftrace.structs.Lookup("GrandChild").lock();
+
+  ASSERT_TRUE(cls->HasFields());
+  // The GrandChild class has a total of 8 fields:
+  //   Parent: a, b, c, d
+  //   Child: d, e, f
+  //   GrandChild: g
+  // Child::d masks Parent::d, so only 7 fields are listed.
+  ASSERT_EQ(cls->fields.size(), (4 - 1) + 3 + 1);
+  ASSERT_EQ(cls->size, 16 + 12 + 4);
+  CheckFieldsOrderedByOffset(cls->fields);
+
+  CheckGrandChildFields(cls);
+}
+
+TEST_F(field_analyser_dwarf, parse_inheritance_multi)
+{
+  BPFtrace bpftrace;
+  std::string uprobe = "uprobe:" + std::string(cxx_bin_);
+  test(bpftrace, uprobe + ":cpp:func_3 { $x = args.m->abc; }", 0);
+
+  std::shared_ptr<Struct> cls;
+  ASSERT_TRUE(bpftrace.structs.Has("struct Multi"));
+  cls = bpftrace.structs.Lookup("struct Multi").lock();
+
+  ASSERT_TRUE(cls->HasFields());
+  ASSERT_EQ(cls->fields.size(), 7);
+  ASSERT_EQ(cls->size, 32);
+  CheckFieldsOrderedByOffset(cls->fields);
+
+  CheckParentFields(cls);
+
+  EXPECT_TRUE(cls->HasField("x"));
+  EXPECT_TRUE(cls->GetField("x").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("x").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("x").offset, 16);
+
+  EXPECT_TRUE(cls->HasField("abc"));
+  EXPECT_TRUE(cls->GetField("abc").type.IsIntTy());
+  EXPECT_EQ(cls->GetField("abc").type.GetSize(), 4);
+  EXPECT_EQ(cls->GetField("abc").offset, 20);
+
+  EXPECT_TRUE(cls->HasField("rabc"));
+  EXPECT_TRUE(cls->GetField("rabc").type.IsRefTy());
+  EXPECT_EQ(cls->GetField("rabc").type.GetSize(), 8);
+  EXPECT_EQ(cls->GetField("rabc").offset, 24);
+}
+
+TEST_F(field_analyser_dwarf, parse_struct_anonymous_fields)
+{
+  GTEST_SKIP() << "Anonymous fields not supported #3084";
+
+  BPFtrace bpftrace;
+  std::string uprobe = "uprobe:" + std::string(bin_);
+  test(bpftrace, uprobe + ":func_1 { $x = args.foo2->g; }", 0);
+
+  ASSERT_TRUE(bpftrace.structs.Has("struct Foo2"));
+  auto str = bpftrace.structs.Lookup("struct Foo2").lock();
+
+  ASSERT_TRUE(str->HasFields());
+  ASSERT_EQ(str->fields.size(), 3);
+  ASSERT_EQ(str->size, 72);
+  CheckFieldsOrderedByOffset(str->fields);
+
+  ASSERT_TRUE(str->HasField("a"));
+  ASSERT_TRUE(str->GetField("a").type.IsIntTy());
+  ASSERT_EQ(str->GetField("a").type.GetSize(), 4);
+  ASSERT_EQ(str->GetField("a").offset, 0);
+
+  ASSERT_TRUE(str->HasField("f"));
+  ASSERT_TRUE(str->GetField("f").type.IsRecordTy());
+  ASSERT_EQ(str->GetField("f").type.GetSize(), 64);
+  ASSERT_EQ(str->GetField("f").offset, 8);
+
+  ASSERT_TRUE(str->HasField("g"));
+  ASSERT_TRUE(str->GetField("g").type.IsIntTy());
+  ASSERT_EQ(str->GetField("g").type.GetSize(), 1);
+  ASSERT_EQ(str->GetField("g").offset, 8);
+}
+
 TEST_F(field_analyser_dwarf, dwarf_types_bitfields)
 {
   BPFtrace bpftrace;
@@ -352,11 +744,16 @@ TEST_F(field_analyser_dwarf, dwarf_types_bitfields)
 
   ASSERT_TRUE(bpftrace.structs.Has("struct task_struct"));
   auto task_struct = bpftrace.structs.Lookup("struct task_struct").lock();
+  CheckFieldsOrderedByOffset(task_struct->fields);
 
+  // clang-tidy doesn't seem to acknowledge that ASSERT_*() will
+  // return from function so that these are in fact checked accesses.
+  //
+  // NOLINTBEGIN(bugprone-unchecked-optional-access)
   ASSERT_TRUE(task_struct->HasField("a"));
   EXPECT_TRUE(task_struct->GetField("a").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("a").type.GetSize(), 4U);
-  EXPECT_TRUE(task_struct->GetField("a").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("a").bitfield.has_value());
 
   EXPECT_TRUE(task_struct->GetField("a").offset == 8 ||
               task_struct->GetField("a").offset == 9);
@@ -373,7 +770,7 @@ TEST_F(field_analyser_dwarf, dwarf_types_bitfields)
   ASSERT_TRUE(task_struct->HasField("b"));
   EXPECT_TRUE(task_struct->GetField("b").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("b").type.GetSize(), 4U);
-  EXPECT_TRUE(task_struct->GetField("b").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("b").bitfield.has_value());
 
   EXPECT_TRUE(task_struct->GetField("b").offset == 8 ||
               task_struct->GetField("b").offset == 10);
@@ -390,7 +787,7 @@ TEST_F(field_analyser_dwarf, dwarf_types_bitfields)
   ASSERT_TRUE(task_struct->HasField("c"));
   EXPECT_TRUE(task_struct->GetField("c").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("c").type.GetSize(), 4U);
-  EXPECT_TRUE(task_struct->GetField("c").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("c").bitfield.has_value());
 
   EXPECT_TRUE(task_struct->GetField("c").offset == 8 ||
               task_struct->GetField("c").offset == 10);
@@ -409,10 +806,11 @@ TEST_F(field_analyser_dwarf, dwarf_types_bitfields)
   EXPECT_TRUE(task_struct->GetField("d").type.IsIntTy());
   EXPECT_EQ(task_struct->GetField("d").type.GetSize(), 4U);
   EXPECT_EQ(task_struct->GetField("d").offset, 12);
-  EXPECT_TRUE(task_struct->GetField("d").bitfield.has_value());
+  ASSERT_TRUE(task_struct->GetField("d").bitfield.has_value());
   EXPECT_EQ(task_struct->GetField("d").bitfield->read_bytes, 0x3U);
   EXPECT_EQ(task_struct->GetField("d").bitfield->access_rshift, 0U);
   EXPECT_EQ(task_struct->GetField("d").bitfield->mask, 0xFFFFFU);
+  // NOLINTEND(bugprone-unchecked-optional-access)
 }
 
 TEST(field_analyser_subprog, struct_cast)
@@ -420,8 +818,6 @@ TEST(field_analyser_subprog, struct_cast)
   test("struct x { int a; } fn f(): void { $s = (struct x *)0; }", 0);
 }
 
-#endif // HAVE_LIBDW
+#endif // HAVE_LIBLLDB
 
-} // namespace field_analyser
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::field_analyser

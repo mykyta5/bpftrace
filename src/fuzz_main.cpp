@@ -75,7 +75,6 @@ int fuzz_main(const char* data, size_t sz)
     return 1;
 
   DISABLE_LOG(DEBUG);
-  DISABLE_LOG(INFO);
   DISABLE_LOG(WARNING);
   // We can't disable error logs because some functions use a length of error
   // log to see if an error occurs. Instead, suppress error log output at each
@@ -132,7 +131,7 @@ int fuzz_main(const char* data, size_t sz)
     struct utsname utsname;
     uname(&utsname);
     std::string ksrc, kobj;
-    auto kdirs = get_kernel_dirs(utsname, !bpftrace.feature_->has_btf());
+    auto kdirs = get_kernel_dirs(utsname);
     ksrc = std::get<0>(kdirs);
     kobj = std::get<1>(kdirs);
 
@@ -176,9 +175,6 @@ int fuzz_main(const char* data, size_t sz)
     // failed to compile
     return 1;
   }
-
-  // for debug
-  // LOG(INFO) << "ok";
 
   return 0;
 }

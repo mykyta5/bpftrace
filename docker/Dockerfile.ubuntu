@@ -16,18 +16,20 @@ RUN apt-get update && apt-get install -y \
     libbpf-dev \
     libbpfcc-dev \
     libcereal-dev \
-    libdw-dev \
     libelf-dev \
     libiberty-dev \
     libpcap-dev \
     llvm-dev \
+    liblldb-dev \
     libclang-dev \
     systemtap-sdt-dev \
     zlib1g-dev
 
 COPY . /src
 WORKDIR /src
-RUN cmake -B /build -DBUILD_TESTING=OFF
+
+# Use CMAKE_BUILD_TYPE=Release if you don't plan on developing bpftrace
+RUN cmake -B /build -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Debug
 RUN make -C /build -j$(nproc)
 
 ENTRYPOINT ["/build/src/bpftrace"]

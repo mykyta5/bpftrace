@@ -8,21 +8,25 @@
 
 namespace bpftrace {
 
-Config::Config(bool has_cmd, bool bt_verbose) : bt_verbose_(bt_verbose)
+Config::Config(bool has_cmd)
 {
   config_map_ = {
     { ConfigKeyBool::cpp_demangle, { .value = true } },
     { ConfigKeyBool::lazy_symbolication, { .value = false } },
-    { ConfigKeyInt::log_size, { .value = (uint64_t)1000000 } },
-    { ConfigKeyInt::max_bpf_progs, { .value = (uint64_t)512 } },
-    { ConfigKeyInt::max_cat_bytes, { .value = (uint64_t)10240 } },
-    { ConfigKeyInt::max_map_keys, { .value = (uint64_t)4096 } },
-    { ConfigKeyInt::max_probes, { .value = (uint64_t)512 } },
-    { ConfigKeyInt::max_strlen, { .value = (uint64_t)64 } },
-    { ConfigKeyInt::max_type_res_iterations, { .value = (uint64_t)0 } },
-    { ConfigKeyInt::perf_rb_pages, { .value = (uint64_t)64 } },
+    { ConfigKeyBool::probe_inline, { .value = false } },
+    { ConfigKeyInt::log_size, { .value = static_cast<uint64_t>(1000000) } },
+    { ConfigKeyInt::max_bpf_progs, { .value = static_cast<uint64_t>(512) } },
+    { ConfigKeyInt::max_cat_bytes, { .value = static_cast<uint64_t>(10240) } },
+    { ConfigKeyInt::max_map_keys, { .value = static_cast<uint64_t>(4096) } },
+    { ConfigKeyInt::max_probes, { .value = static_cast<uint64_t>(512) } },
+    { ConfigKeyInt::max_strlen, { .value = static_cast<uint64_t>(64) } },
+    { ConfigKeyInt::max_type_res_iterations,
+      { .value = static_cast<uint64_t>(0) } },
+    { ConfigKeyInt::perf_rb_pages, { .value = static_cast<uint64_t>(64) } },
     { ConfigKeyStackMode::default_, { .value = StackMode::bpftrace } },
-    { ConfigKeyString::str_trunc_trailer, { .value = ".." } },
+    { ConfigKeyString::str_trunc_trailer, { .value = std::string("..") } },
+    { ConfigKeyMissingProbes::default_,
+      { .value = ConfigMissingProbes::warn } },
     // by default, cache user symbols per program if ASLR is disabled on system
     // or `-c` option is given
     { ConfigKeyUserSymbolCacheType::default_,
@@ -49,8 +53,7 @@ bool Config::is_aslr_enabled()
   {
     std::ifstream file(randomize_va_space_file);
     if (file.fail()) {
-      if (bt_verbose_)
-        LOG(ERROR) << std::strerror(errno) << ": " << randomize_va_space_file;
+      LOG(V1) << std::strerror(errno) << ": " << randomize_va_space_file;
       // conservatively return true
       return true;
     }
@@ -141,6 +144,23 @@ bool ConfigSetter::set_user_symbol_cache_type(const std::string &s)
     return false;
   }
   return config_.set(ConfigKeyUserSymbolCacheType::default_, usct, source_);
+}
+
+bool ConfigSetter::set_missing_probes_config(const std::string &s)
+{
+  ConfigMissingProbes mp;
+  if (s == "ignore") {
+    mp = ConfigMissingProbes::ignore;
+  } else if (s == "warn") {
+    mp = ConfigMissingProbes::warn;
+  } else if (s == "error") {
+    mp = ConfigMissingProbes::error;
+  } else {
+    LOG(ERROR) << "Invalid value for missing_probes: valid values are "
+                  "\"ignore\", \"warn\", and \"error\".";
+    return false;
+  }
+  return config_.set(ConfigKeyMissingProbes::default_, mp, source_);
 }
 
 } // namespace bpftrace

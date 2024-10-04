@@ -31,6 +31,7 @@ public:
   void visit(Map &map) override;
   void visit(Variable &var) override;
   void visit(FieldAccess &acc) override;
+  void visit(ArrayAccess &arr) override;
   void visit(Cast &cast) override;
   void visit(Sizeof &szof) override;
   void visit(Offsetof &ofof) override;
@@ -43,7 +44,7 @@ public:
   int analyse();
 
 private:
-  bool resolve_args(Probe &probe);
+  void resolve_args(Probe &probe);
   void resolve_fields(SizedType &type);
   void resolve_type(SizedType &type);
 

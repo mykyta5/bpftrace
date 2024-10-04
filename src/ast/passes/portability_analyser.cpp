@@ -5,8 +5,7 @@
 #include "log.h"
 #include "types.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 PortabilityAnalyser::PortabilityAnalyser(Node *root, std::ostream &out)
     : root_(root), out_(out)
@@ -54,10 +53,8 @@ void PortabilityAnalyser::visit(Builtin &builtin)
 
 void PortabilityAnalyser::visit(Call &call)
 {
-  if (call.vargs) {
-    for (Expression *expr : *call.vargs)
-      Visit(*expr);
-  }
+  for (Expression *expr : call.vargs)
+    Visit(*expr);
 
   // kaddr() and uaddr() both resolve symbols -> address during codegen and
   // embeds the values into the bytecode. For AOT to support kaddr()/uaddr(),
@@ -128,5 +125,4 @@ Pass CreatePortabilityPass()
   return Pass("PortabilityAnalyser", fn);
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

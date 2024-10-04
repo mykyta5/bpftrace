@@ -25,11 +25,6 @@ static inline int pidfd_open(int pid, unsigned int flags)
   return syscall(__NR_pidfd_open, pid, flags);
 }
 
-ProcMon::ProcMon(const std::string& pid)
-{
-  setup(parse_pid(pid));
-}
-
 ProcMon::ProcMon(pid_t pid)
 {
   setup(pid);
@@ -68,7 +63,7 @@ ProcMon::~ProcMon()
     close(pidfd_);
 }
 
-bool ProcMon::is_alive(void)
+bool ProcMon::is_alive()
 {
   // store death to avoid pid reuse issues on polling /proc
   if (died_)

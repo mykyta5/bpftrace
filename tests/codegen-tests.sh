@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Runs or updates codegen tests' expected LLVM IR
-# requires nix
+# Runs or updates codegen tests' expected LLVM IR.
+# Requires nix.
 #
 # Example usage:
 #
@@ -15,7 +15,7 @@ UPDATE_TESTS=${BPFTRACE_UPDATE_TESTS:-0}
 SCRIPT_NAME=$0
 
 function run() {
-  nix develop .#bpftrace-llvm12 --command "$@"
+  nix develop .#bpftrace-llvm18 --command "$@"
 }
 
 usage() {
@@ -48,5 +48,5 @@ done
 cd "$(git rev-parse --show-toplevel)"
 
 run cmake -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
-run make -C "$BUILD_DIR" -j $(nproc)
+run make -C "$BUILD_DIR" -j $(nproc) bpftrace_test
 BPFTRACE_UPDATE_TESTS=${UPDATE_TESTS} run ./"$BUILD_DIR"/tests/bpftrace_test --gtest_filter="codegen*"

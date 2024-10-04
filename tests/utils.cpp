@@ -1,19 +1,17 @@
 #include "utils.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
-#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include "filesystem.h"
 
-namespace bpftrace {
-namespace test {
-namespace utils {
+namespace bpftrace::test::utils {
 
 TEST(utils, split_string)
 {
@@ -59,6 +57,40 @@ TEST(utils, split_addrrange_symbol_module)
                 "0xffffffffc17e9373-0xffffffffc17e94ff	vmx_vmexit "
                 "[kvm_intel]"),
             tokens_ar_sym_mod);
+}
+
+static void test_erase_parameter_list(std::string input,
+                                      std::string_view expected)
+{
+  erase_parameter_list(input);
+  EXPECT_EQ(input, expected);
+}
+
+TEST(utils, erase_parameter_list)
+{
+  // Trivial cases
+  test_erase_parameter_list("", "");
+  test_erase_parameter_list("()", "");
+  test_erase_parameter_list("void foo", "void foo");
+  test_erase_parameter_list("void foo()", "void foo");
+  test_erase_parameter_list("void foo(Bar &b)", "void foo");
+  // Qualified functions
+  //   we don't need to handle `noexcept` or trailing return type
+  //   because they don't appear in the demangled function name
+  test_erase_parameter_list("void foo() &&", "void foo");
+  test_erase_parameter_list("void foo() const", "void foo");
+  // Templated parameter/function
+  test_erase_parameter_list("void foo(Bar<Baz> &b)", "void foo");
+  test_erase_parameter_list("void foo(Bar<Baz()> &b)", "void foo");
+  test_erase_parameter_list("void foo<Bar()>()", "void foo<Bar()>");
+  test_erase_parameter_list("void foo<Bar()>::foo(Bar &b)",
+                            "void foo<Bar()>::foo");
+  // Function pointer
+  test_erase_parameter_list("void foo(void (*func)(int))", "void foo");
+  test_erase_parameter_list("void foo(void (*func)(int, Bar<Baz()>))",
+                            "void foo");
+  // Missing closing parenthesis
+  test_erase_parameter_list("void foo(Bar &b", "void foo(Bar &b");
 }
 
 TEST(utils, wildcard_match)
@@ -347,6 +379,25 @@ TEST(utils, find_in_path)
   EXPECT_TRUE(std_filesystem::remove_all(path));
 }
 
+// These tests are a bit hacky and rely on repository structure.
+//
+// They rely on the fact that the test binary is in the same directory
+// as some of the other test binaries.
+//
+// Hopefully they are easy to maintain. If not, please delete.
+TEST(utils, find_near_self)
+{
+  auto runtime_tests = find_near_self("runtime-tests.sh");
+  // clang-tidy is not aware ASSERT_*() terminates testcase
+  // NOLINTBEGIN(bugprone-unchecked-optional-access)
+  ASSERT_TRUE(runtime_tests.has_value());
+  EXPECT_TRUE(runtime_tests->filename() == "runtime-tests.sh");
+  EXPECT_TRUE(std_filesystem::exists(*runtime_tests));
+  // NOLINTEND(bugprone-unchecked-optional-access)
+
+  EXPECT_FALSE(find_near_self("SHOULD_NOT_EXIST").has_value());
+}
+
 TEST(utils, get_pids_for_program)
 {
   auto pids = get_pids_for_program("/proc/self/exe");
@@ -354,31 +405,8 @@ TEST(utils, get_pids_for_program)
   ASSERT_EQ(pids.size(), 1);
   ASSERT_EQ(pids[0], getpid());
 
-  pids = get_pids_for_program("/proc/12345/root/usr/bin/bash");
+  pids = get_pids_for_program("/doesnotexist");
   ASSERT_EQ(pids.size(), 0);
 }
 
-TEST(utils, file_exists_and_ownedby_root)
-{
-  std::string tmpdir = "/tmp/bpftrace-test-utils-XXXXXX";
-  std::string file1 = "/ownedby-user";
-  std::string file2 = "/no-exists";
-  if (::mkdtemp(tmpdir.data()) == nullptr) {
-    throw std::runtime_error("creating temporary path for tests failed");
-  }
-
-  int fd;
-  fd = open((tmpdir + file1).c_str(), O_CREAT, S_IRUSR);
-  close(fd);
-  ASSERT_GE(fd, 0);
-
-  EXPECT_FALSE(file_exists_and_ownedby_root((tmpdir + file1).c_str()));
-  EXPECT_FALSE(file_exists_and_ownedby_root((tmpdir + file2).c_str()));
-  EXPECT_TRUE(file_exists_and_ownedby_root("/proc/1/maps"));
-
-  EXPECT_GT(std_filesystem::remove_all(tmpdir), 0);
-}
-
-} // namespace utils
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::utils

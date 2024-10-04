@@ -1,4 +1,5 @@
 #include "arch.h"
+#include "utils.h"
 
 #include <algorithm>
 #include <array>
@@ -78,7 +79,7 @@ static std::array<std::string, 32> ptrace_registers = {
   "regs[28]",
   "regs[29]",
   "regs[30]",
-  "regs[31]", 
+  "regs[31]",
 };
 
 static std::array<std::string, 8> arg_registers = {
@@ -161,7 +162,7 @@ std::string name()
 
 std::vector<std::string> invalid_watchpoint_modes()
 {
-  throw std::runtime_error(
+  throw FatalUserException(
       "Watchpoints are not supported on this architecture");
 }
 

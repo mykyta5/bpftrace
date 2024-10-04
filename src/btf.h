@@ -74,11 +74,12 @@ public:
   std::map<std::string, std::vector<std::string>> get_params(
       const std::set<std::string>& funcs) const;
 
-  Struct resolve_args(const std::string& func, bool ret);
+  std::optional<Struct> resolve_args(const std::string& func,
+                                     bool ret,
+                                     std::string& err);
   void resolve_fields(SizedType& type);
 
-  std::pair<int, int> get_btf_id_fd(const std::string& func,
-                                    const std::string& mod) const;
+  int get_btf_id(std::string_view func, std::string_view mod) const;
 
 private:
   void load_kernel_btfs(const std::set<std::string>& modules);
@@ -89,7 +90,7 @@ private:
   BTF::BTFId find_id(const std::string& name,
                      std::optional<__u32> kind = std::nullopt) const;
   __s32 find_id_in_btf(struct btf* btf,
-                       const std::string& name,
+                       std::string_view name,
                        std::optional<__u32> = std::nullopt) const;
 
   std::string dump_defs_from_btf(const struct btf* btf,
@@ -101,6 +102,13 @@ private:
   std::set<std::string> get_all_structs_from_btf(const struct btf* btf) const;
   std::unordered_set<std::string> get_all_iters_from_btf(
       const struct btf* btf) const;
+  /*
+   * Similar to btf_type_skip_modifiers this returns the id of the first
+   * type that is not a BTF_KIND_TYPE_TAG while also populating the tags set
+   * with the tag/attribute names from the BTF_KIND_TYPE_TAG types it finds.
+   */
+  __u32 get_type_tags(std::unordered_set<std::string>& tags,
+                      const BTFId& btf_id) const;
 
   __s32 start_id(const struct btf* btf) const;
 

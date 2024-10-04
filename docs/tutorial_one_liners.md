@@ -4,6 +4,10 @@ This teaches you bpftrace for Linux in 12 easy lessons, where each lesson is a o
 
 Contributed by Brendan Gregg, Netflix (2018), based on his FreeBSD [DTrace Tutorial](https://wiki.freebsd.org/DTrace/Tutorial).
 
+Note: bpftrace 0.19 changed the way probe arguments are accessed (using
+`args.xxx` instead of `args->xxx`). If you are using an older version of
+bpftrace, you will need to use `args->xxx` in the below examples.
+
 # Lesson 1. Listing Probes
 
 ```
@@ -130,7 +134,7 @@ Summarize read() bytes as a linear histogram, and traced using kernel dynamic tr
 # Lesson 7. Timing read()s
 
 ```
-# bpftrace -e 'kprobe:vfs_read { @start[tid] = nsecs; } kretprobe:vfs_read /@start[tid]/ { @ns[comm] = hist(nsecs - @start[tid]); delete(@start[tid]); }'
+# bpftrace -e 'kprobe:vfs_read { @start[tid] = nsecs; } kretprobe:vfs_read /@start[tid]/ { @ns[comm] = hist(nsecs - @start[tid]); delete(@start, tid); }'
 Attaching 2 probes...
 
 [...]
@@ -164,7 +168,7 @@ Summarize the time spent in read(), in nanoseconds, as a histogram, by process n
 - nsecs: Nanoseconds since boot. This is a high resolution timestamp counter than can be used to time events.
 - /@start[tid]/: This filter checks that the start time was seen and recorded. Without this filter, this program may be launched during a read and only catch the end, resulting in a time calculation of now - zero, instead of now - start.
 
-- delete(@start[tid]): this frees the variable.
+- delete(@start, tid): this frees the variable.
 
 # Lesson 8. Count Process-Level Events
 

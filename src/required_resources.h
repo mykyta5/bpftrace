@@ -12,7 +12,6 @@
 
 #include "format_string.h"
 #include "location.hh"
-#include "mapkey.h"
 #include "struct.h"
 #include "types.h"
 
@@ -49,7 +48,7 @@ private:
 };
 
 struct MapInfo {
-  MapKey key;
+  SizedType key_type;
   SizedType value_type;
   std::optional<LinearHistogramArgs> lhist_args;
   std::optional<int> hist_bits_arg;
@@ -60,7 +59,7 @@ private:
   template <typename Archive>
   void serialize(Archive &archive)
   {
-    archive(key, value_type, lhist_args, hist_bits_arg, id);
+    archive(key_type, value_type, lhist_args, hist_bits_arg, id);
   }
 };
 
@@ -86,36 +85,38 @@ public:
   void load_state(const uint8_t *ptr, size_t len);
 
   // Async argument metadata
+  std::vector<std::tuple<FormatString, std::vector<Field>>> printf_args;
   std::vector<std::tuple<FormatString, std::vector<Field>>> system_args;
-  // mapped_printf_args stores seq_printf, debugf arguments
-  std::vector<std::tuple<FormatString, std::vector<Field>>> mapped_printf_args;
-  // mapped_printf_ids stores the starting indices and length of each format
-  // string in the data map of MapType::MappedPrintfData
-  std::vector<std::tuple<int, int>> mapped_printf_ids;
+  // fmt strings for BPF helpers (bpf_seq_printf, bpf_trace_printk)
+  std::vector<FormatString> bpf_print_fmts;
+  std::vector<std::tuple<FormatString, std::vector<Field>>> cat_args;
   std::vector<std::string> join_args;
   std::vector<std::string> time_args;
   std::vector<std::string> strftime_args;
   std::vector<std::string> cgroup_path_args;
-  std::vector<std::tuple<FormatString, std::vector<Field>>> cat_args;
   std::vector<SizedType> non_map_print_args;
   std::vector<std::tuple<std::string, long>> skboutput_args_;
+  // While max fmtstring args size is not used at runtime, the size
+  // calculation requires taking into account struct alignment semantics,
+  // and that is tricky enough that we want to minimize repetition of
+  // such logic in the codebase. So keep it in resource analysis
+  // rather than duplicating it in CodegenResources.
+  uint64_t max_fmtstring_args_size = 0;
+
+  // Required for sizing of tuple scratch buffer
+  size_t tuple_buffers = 0;
+  size_t max_tuple_size = 0;
 
   // Async argument metadata that codegen creates. Ideally ResourceAnalyser
   // pass should be collecting this, but it's complex to move the logic.
   //
   // Don't add more async arguments here!.
   std::unordered_map<int64_t, struct HelperErrorInfo> helper_error_info;
-  // `printf_args` is created here but the field offsets are fixed up
-  // by codegen -- only codegen knows data layout to compute offsets
-  std::vector<std::tuple<FormatString, std::vector<Field>>> printf_args;
   std::vector<std::string> probe_ids;
 
   // Map metadata
   std::map<std::string, MapInfo> maps_info;
-  std::unordered_set<StackType> stackid_maps;
-  bool needs_join_map = false;
-  bool needs_elapsed_map = false;
-  bool needs_data_map = false;
+  std::unordered_set<bpftrace::globalvars::GlobalVar> needed_global_vars;
   bool needs_perf_event_map = false;
 
   // Probe metadata
@@ -127,7 +128,7 @@ public:
   std::vector<Probe> watchpoint_probes;
 
   // List of probes using userspace symbol resolution
-  std::unordered_set<ast::Probe *> probes_using_usym;
+  std::unordered_set<const ast::Probe *> probes_using_usym;
 
 private:
   friend class cereal::access;
@@ -135,8 +136,7 @@ private:
   void serialize(Archive &archive)
   {
     archive(system_args,
-            mapped_printf_args,
-            mapped_printf_ids,
+            bpf_print_fmts,
             join_args,
             time_args,
             strftime_args,
@@ -147,10 +147,7 @@ private:
             printf_args,
             probe_ids,
             maps_info,
-            stackid_maps,
-            needs_join_map,
-            needs_elapsed_map,
-            needs_data_map,
+            needed_global_vars,
             needs_perf_event_map,
             probes,
             special_probes);

@@ -15,7 +15,7 @@ bool PCAPwriter::open(std::string file)
   return true;
 }
 
-void PCAPwriter::close(void)
+void PCAPwriter::close()
 {
   pcap_close(pd_);
   pcap_dump_close(pdumper_);
@@ -41,7 +41,9 @@ bool PCAPwriter::write(uint64_t ns, void *pkt, unsigned int size)
     .len    = size,
   };
 
-  pcap_dump((u_char *)pdumper_, &hdr, (const u_char *)pkt);
+  pcap_dump(reinterpret_cast<u_char *>(pdumper_),
+            &hdr,
+            static_cast<const u_char *>(pkt));
   return true;
 }
 

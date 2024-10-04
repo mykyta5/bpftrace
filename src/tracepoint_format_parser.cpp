@@ -17,7 +17,7 @@ std::set<std::string> TracepointFormatParser::struct_list;
 bool TracepointFormatParser::parse(ast::Program *program, BPFtrace &bpftrace)
 {
   std::vector<ast::Probe *> probes_with_tracepoint;
-  for (ast::Probe *probe : *program->probes) {
+  for (ast::Probe *probe : program->probes) {
     if (probe->has_ap_of_probetype(ProbeType::tracepoint))
       probes_with_tracepoint.push_back(probe);
   }
@@ -31,7 +31,7 @@ bool TracepointFormatParser::parse(ast::Program *program, BPFtrace &bpftrace)
   for (ast::Probe *probe : probes_with_tracepoint) {
     n.visit(*probe);
 
-    for (ast::AttachPoint *ap : *probe->attach_points) {
+    for (ast::AttachPoint *ap : probe->attach_points) {
       if (ap->provider == "tracepoint") {
         std::string &category = ap->target;
         std::string &event_name = ap->func;
@@ -42,7 +42,7 @@ bool TracepointFormatParser::parse(ast::Program *program, BPFtrace &bpftrace)
         if (has_wildcard(category) || has_wildcard(event_name)) {
           // tracepoint wildcard expansion, part 1 of 3. struct definitions.
           memset(&glob_result, 0, sizeof(glob_result));
-          int ret = glob(format_file_path.c_str(), 0, NULL, &glob_result);
+          int ret = glob(format_file_path.c_str(), 0, nullptr, &glob_result);
           if (ret != 0) {
             if (ret == GLOB_NOMATCH) {
               LOG(ERROR, ap->loc, std::cerr)
@@ -51,9 +51,7 @@ bool TracepointFormatParser::parse(ast::Program *program, BPFtrace &bpftrace)
               if (category == "syscall")
                 LOG(ERROR, ap->loc, std::cerr)
                     << "Did you mean syscalls:" << event_name << "?";
-              if (bt_verbose) {
-                LOG(ERROR) << strerror(errno) << ": " << format_file_path;
-              }
+              LOG(V1) << strerror(errno) << ": " << format_file_path;
               return false;
             } else {
               // unexpected error
@@ -98,7 +96,7 @@ bool TracepointFormatParser::parse(ast::Program *program, BPFtrace &bpftrace)
 
             // Do not fail if trying to attach to multiple tracepoints
             // (at least one of them could succeed)
-            bool fail = probe->attach_points->size() == 1;
+            bool fail = probe->attach_points.size() == 1;
             auto msg = "tracepoint not found: " + category + ":" + event_name;
             if (fail)
               LOG(ERROR, ap->loc, std::cerr) << msg;

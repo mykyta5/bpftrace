@@ -5,8 +5,7 @@
 
 #include "ast/irbuilderbpf.h"
 
-namespace bpftrace {
-namespace AsyncEvent {
+namespace bpftrace::AsyncEvent {
 
 std::vector<llvm::Type*> Print::asLLVMType(ast::IRBuilderBPF& b)
 {
@@ -53,10 +52,10 @@ std::vector<llvm::Type*> Strftime::asLLVMType(ast::IRBuilderBPF& b)
   };
 }
 
-std::vector<llvm::Type*> Buf::asLLVMType(ast::IRBuilderBPF& b, size_t length)
+std::vector<llvm::Type*> Buf::asLLVMType(ast::IRBuilderBPF& b, uint32_t length)
 {
   return {
-    b.getInt8Ty(),                               // buffer length
+    b.getInt32Ty(),                              // buffer length
     llvm::ArrayType::get(b.getInt8Ty(), length), // buffer content
   };
 }
@@ -104,5 +103,4 @@ std::vector<llvm::Type*> SkbOutput::asLLVMType(ast::IRBuilderBPF& b)
   };
 }
 
-} // namespace AsyncEvent
-} // namespace bpftrace
+} // namespace bpftrace::AsyncEvent

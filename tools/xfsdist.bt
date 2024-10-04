@@ -16,6 +16,8 @@
  * 08-Sep-2018	Brendan Gregg	Created this.
  */
 
+config = { missing_probes = "ignore" }
+
 BEGIN
 {
 	printf("Tracing XFS operation latency... Hit Ctrl-C to end.\n");
@@ -37,8 +39,8 @@ kretprobe:xfs_file_fsync
 /@start[tid]/
 {
 	@us[@name[tid]] = hist((nsecs - @start[tid]) / 1000);
-	delete(@start[tid]);
-	delete(@name[tid]);
+	delete(@start, tid);
+	delete(@name, tid);
 }
 
 END

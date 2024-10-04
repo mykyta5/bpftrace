@@ -11,6 +11,8 @@
  * 17-Dec-2021	Tao Xu	created this.
  */
 
+config = { missing_probes = "ignore" }
+
 BEGIN
 {
 	printf("Tracing SSL/TLS handshake... Hit Ctrl-C to end.\n");
@@ -37,7 +39,7 @@ uretprobe:libssl:SSL_do_handshake
 		@histF[@func_ssl[tid]] = lhist($lat_us, 0, 1000, 200);
 		@statF[@func_ssl[tid]] = stats($lat_us);
 	}
-	delete(@start_ssl[tid]); delete(@func_ssl[tid]);
+	delete(@start_ssl, tid); delete(@func_ssl, tid);
 }
 
 // need debug symbol for ossl local functions
@@ -69,7 +71,7 @@ uretprobe:libcrypto:ecdh_simple_compute_key
 	$lat_us = (nsecs - @start_crypto[tid]) / 1000;
 	@hist[@func_crypto[tid]] = lhist($lat_us, 0, 1000, 200);
 	@stat[@func_crypto[tid]] = stats($lat_us);
-	delete(@start_crypto[tid]); delete(@func_crypto[tid]);
+	delete(@start_crypto, tid); delete(@func_crypto, tid);
 }
 
 END

@@ -7,12 +7,15 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/utsname.h>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <variant>
 #include <vector>
 
 #include "filesystem.h"
@@ -40,23 +43,16 @@ private:
   std::string msg_;
 };
 
-class InvalidPIDException : public std::exception {
+class EnospcException : public std::runtime_error {
 public:
-  InvalidPIDException(const std::string &pid, const std::string &msg)
-  {
-    msg_ = "pid '" + pid + "' " + msg;
-  }
-
-  const char *what() const noexcept override
-  {
-    return msg_.c_str();
-  }
-
-private:
-  std::string msg_;
+  // C++11 feature: bring base class constructor into scope to automatically
+  // forward constructor calls to base class
+  using std::runtime_error::runtime_error;
 };
 
-class EnospcException : public std::runtime_error {
+// Use this to end bpftrace execution due to a user error.
+// These should be caught at a high level only e.g. main.cpp or bpftrace.cpp
+class FatalUserException : public std::runtime_error {
 public:
   // C++11 feature: bring base class constructor into scope to automatically
   // forward constructor calls to base class
@@ -121,6 +117,18 @@ struct DeprecatedName {
   std::string old_name;
   std::string new_name;
   bool show_warning = true;
+  bool replace_by_new_name = true;
+
+  bool matches(const std::string &name) const
+  {
+    // We allow a prefix match to match against builtins with number (argX)
+    if (old_name.back() == '*') {
+      std::string_view old_name_view{ old_name.c_str(), old_name.size() - 1 };
+      return name.rfind(old_name_view) == 0;
+    }
+
+    return name == old_name;
+  }
 };
 
 typedef std::unordered_map<std::string, std::unordered_set<std::string>>
@@ -137,7 +145,9 @@ struct KConfig {
   std::unordered_map<std::string, std::string> config;
 };
 
-static std::vector<DeprecatedName> DEPRECATED_LIST = {};
+static std::vector<DeprecatedName> DEPRECATED_LIST = {
+  { "sarg*", "*(reg(\"sp\") + <stack_offset>)", true, false }
+};
 
 static std::vector<std::string> UNSAFE_BUILTIN_FUNCS = {
   "system",
@@ -149,12 +159,21 @@ static std::vector<std::string> COMPILE_TIME_FUNCS = { "cgroupid" };
 
 static std::vector<std::string> UPROBE_LANGS = { "cpp" };
 
-bool get_uint64_env_var(const ::std::string &str,
+static const std::set<std::string> RECURSIVE_KERNEL_FUNCS = {
+  "vmlinux:_raw_spin_lock",
+  "vmlinux:_raw_spin_lock_irqsave",
+  "vmlinux:_raw_spin_unlock_irqrestore",
+  "vmlinux:queued_spin_lock_slowpath",
+};
+
+void get_uint64_env_var(const ::std::string &str,
                         const std::function<void(uint64_t)> &cb);
-bool get_bool_env_var(const ::std::string &str,
+void get_bool_env_var(const ::std::string &str,
                       const std::function<void(bool)> &cb);
 // Tries to find a file in $PATH
-std::optional<std_filesystem::path> find_in_path(const std::string &name);
+std::optional<std_filesystem::path> find_in_path(std::string_view name);
+// Finds a file in the same directory as running binary
+std::optional<std_filesystem::path> find_near_self(std::string_view name);
 std::string get_pid_exe(pid_t pid);
 std::string get_pid_exe(const std::string &pid);
 std::string get_proc_maps(const std::string &pid);
@@ -164,8 +183,9 @@ std::vector<std::string> split_string(const std::string &str,
                                       char delimiter,
                                       bool remove_empty = false);
 std::string erase_prefix(std::string &str);
-bool wildcard_match(const std::string &str,
-                    std::vector<std::string> &tokens,
+void erase_parameter_list(std::string &demangled_name);
+bool wildcard_match(std::string_view str,
+                    const std::vector<std::string> &tokens,
                     bool start_wildcard,
                     bool end_wildcard);
 std::vector<std::string> get_wildcard_tokens(const std::string &input,
@@ -173,11 +193,12 @@ std::vector<std::string> get_wildcard_tokens(const std::string &input,
                                              bool &end_wildcard);
 std::vector<int> get_online_cpus();
 std::vector<int> get_possible_cpus();
+int get_max_cpu_id();
 bool is_dir(const std::string &path);
 bool file_exists_and_ownedby_root(const char *f);
-std::tuple<std::string, std::string> get_kernel_dirs(
-    const struct utsname &utsname,
-    bool unpack_kheaders = true);
+bool get_kernel_dirs(const struct utsname &utsname,
+                     std::string &ksrc,
+                     std::string &kobj);
 std::vector<std::string> get_kernel_cflags(const char *uname_machine,
                                            const std::string &ksrc,
                                            const std::string &kobj,
@@ -191,19 +212,23 @@ std::vector<std::pair<std::string, std::string>> get_cgroup_paths(
 bool is_module_loaded(const std::string &module);
 FuncsModulesMap parse_traceable_funcs();
 const std::string &is_deprecated(const std::string &str);
+bool is_recursive_func(const std::string &func_name);
 bool is_unsafe_func(const std::string &func_name);
 bool is_compile_time_func(const std::string &func_name);
 bool is_supported_lang(const std::string &lang);
+bool is_type_name(std::string_view str);
 std::string exec_system(const char *cmd);
+bool is_exe(const std::string &path);
 std::vector<std::string> resolve_binary_path(const std::string &cmd);
 std::vector<std::string> resolve_binary_path(const std::string &cmd, int pid);
 std::string path_for_pid_mountns(int pid, const std::string &path);
 void cat_file(const char *filename, size_t, std::ostream &);
 std::string str_join(const std::vector<std::string> &list,
                      const std::string &delim);
-bool is_numeric(const std::string &str);
+std::optional<std::variant<int64_t, uint64_t>> get_int_from_str(
+    const std::string &s);
 bool symbol_has_cpp_mangled_signature(const std::string &sym_name);
-pid_t parse_pid(const std::string &str);
+std::optional<pid_t> parse_pid(const std::string &str, std::string &err);
 std::string hex_format_buffer(const char *buf,
                               size_t size,
                               bool keep_ascii = true,
@@ -232,13 +257,13 @@ std::vector<int> get_pids_for_program(const std::string &program);
 std::vector<int> get_all_running_pids();
 
 std::string sanitise_bpf_program_name(const std::string &name);
-// Generate object file section name for a given probe
-inline std::string get_section_name_for_probe(
+// Generate object file function name for a given probe
+inline std::string get_function_name_for_probe(
     const std::string &probe_name,
     int index,
     std::optional<int> usdt_location_index = std::nullopt)
 {
-  auto ret = "s_" + probe_name;
+  auto ret = sanitise_bpf_program_name(probe_name);
 
   if (usdt_location_index)
     ret += "_loc" + std::to_string(*usdt_location_index);
@@ -248,18 +273,23 @@ inline std::string get_section_name_for_probe(
   return ret;
 }
 
+inline std::string get_section_name(const std::string &function_name)
+{
+  return "s_" + function_name;
+}
+
 inline std::string get_watchpoint_setup_probe_name(
     const std::string &probe_name)
 {
   return probe_name + "_wp_setup";
 }
 
-inline std::string get_section_name_for_watchpoint_setup(
+inline std::string get_function_name_for_watchpoint_setup(
     const std::string &probe_name,
     int index)
 {
-  return get_section_name_for_probe(get_watchpoint_setup_probe_name(probe_name),
-                                    index);
+  return get_function_name_for_probe(
+      get_watchpoint_setup_probe_name(probe_name), index);
 }
 
 // trim from end of string (right)
@@ -290,7 +320,8 @@ T read_data(const void *src)
   return v;
 }
 
-uint32_t kernel_version(int attempt);
+enum KernelVersionMethod { vDSO, UTS, File, None };
+uint32_t kernel_version(KernelVersionMethod);
 
 template <typename T>
 T reduce_value(const std::vector<uint8_t> &value, int nvalues)
@@ -301,8 +332,57 @@ T reduce_value(const std::vector<uint8_t> &value, int nvalues)
   }
   return sum;
 }
-int64_t min_value(const std::vector<uint8_t> &value, int nvalues);
-uint64_t max_value(const std::vector<uint8_t> &value, int nvalues);
+
+template <typename T>
+T min_max_value(const std::vector<uint8_t> &value, int nvalues, bool is_max)
+{
+  T mm_val = 0;
+  bool mm_set = false;
+  for (int i = 0; i < nvalues; i++) {
+    T val = read_data<T>(value.data() + i * (sizeof(T) * 2));
+    uint32_t is_set = read_data<uint32_t>(value.data() + sizeof(T) +
+                                          i * (sizeof(T) * 2));
+    if (!is_set) {
+      continue;
+    }
+    if (!mm_set) {
+      mm_val = val;
+      mm_set = true;
+    } else if (is_max && val > mm_val) {
+      mm_val = val;
+    } else if (!is_max && val < mm_val) {
+      mm_val = val;
+    }
+  }
+  return mm_val;
+}
+
+template <typename T>
+struct stats {
+  T total;
+  T count;
+  T avg;
+};
+
+template <typename T>
+stats<T> stats_value(const std::vector<uint8_t> &value, int nvalues)
+{
+  stats<T> ret = { 0, 0, 0 };
+  for (int i = 0; i < nvalues; i++) {
+    T val = read_data<T>(value.data() + i * (sizeof(T) * 2));
+    T cpu_count = read_data<T>(value.data() + sizeof(T) + i * (sizeof(T) * 2));
+    ret.count += cpu_count;
+    ret.total += val;
+  }
+  ret.avg = (T)(ret.total / ret.count);
+  return ret;
+}
+
+template <typename T>
+T avg_value(const std::vector<uint8_t> &value, int nvalues)
+{
+  return stats_value<T>(value, nvalues).avg;
+}
 
 // Combination of 2 hashes
 // The algorithm is taken from boost::hash_combine

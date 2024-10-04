@@ -27,19 +27,19 @@ compares it (string compare) with the expected result, a file named by the
 second argument. The `NAME` macro holds the test name,  which is `call_avg` in
 this case.
 
-These tests run as part of the normal suite of unit tests if you are running LLVM 12.
+These tests run as part of the normal suite of unit tests if you are running LLVM 18.
 If not, you need to install 'nix' and run these tests via this script:
 `./tests/codegen-tests.sh`.
 
 #### Updating
 
-**LLVM 12**
+**LLVM 18**
 
-If you are running LLVM 12 or want to only update specific tests with `--gtest_filter`
+If you are running LLVM 18 or want to only update specific tests with `--gtest_filter`
 run `<builddir>/tests/bpftrace_test` with `BPFTRACE_UPDATE_TESTS=1` and the `test`
 helper will update the IR instead of running the tests.
 
-**Not LLVM 12**
+**Not LLVM 18**
 
 Run `./tests/codegen-tests.sh -u`. This updates all the codegen tests.
 
@@ -122,14 +122,13 @@ not known until test time. The following runtime variables are available for the
 `RUN` directive:
 
 * `{{BPFTRACE}}`: Path to bpftrace executable
-* `{{BPFTRACE_AOTRT}}`: Path to bpftrace ahead-of-time runtime executable
 * `{{BEFORE_PID}}`: Process ID of the process in `BEFORE` directive
 
 ### Test programs
 
-You can add test programs for your runtime tests by placing a `.c` file corresponding to your test program in `tests/testprogs`.
+You can add test programs for your runtime tests by placing a `.c` or `.cpp` file corresponding to your test program in `tests/testprogs`.
 
-You can add test libraries for your runtime tests by placing a `.c` file corresponding to your test library in `tests/testlibs`.
+You can add test libraries for your runtime tests by placing a `.c` or `.cpp` file corresponding to your test library in `tests/testlibs`.
 
 The test file `tests/testprogs/my_test.c` will result in an executable that you can call and probe in your runtime test at `./testprogs/my_test`
 

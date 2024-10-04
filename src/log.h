@@ -14,10 +14,9 @@ namespace bpftrace {
 enum class LogType
 {
   DEBUG,
-  INFO,
+  V1,
   WARNING,
   ERROR,
-  FATAL,
   BUG,
 };
 // clang-format on
@@ -50,7 +49,7 @@ public:
   }
   inline void disable(LogType type)
   {
-    assert(type != LogType::FATAL);
+    assert(type != LogType::BUG && type != LogType::ERROR);
     enabled_map_[type] = false;
   }
   inline bool is_enabled(LogType type)
@@ -102,22 +101,6 @@ protected:
   std::ostringstream buf_;
 };
 
-class LogStreamFatal : public LogStream {
-public:
-  LogStreamFatal(const std::string& file,
-                 int line,
-                 __attribute__((unused)) LogType,
-                 std::ostream& out = std::cerr)
-      : LogStream(file, line, LogType::FATAL, out){};
-  LogStreamFatal(const std::string& file,
-                 int line,
-                 __attribute__((unused)) LogType,
-                 const location& loc,
-                 std::ostream& out = std::cerr)
-      : LogStream(file, line, LogType::FATAL, loc, out){};
-  [[noreturn]] ~LogStreamFatal();
-};
-
 class LogStreamBug : public LogStream {
 public:
   LogStreamBug(const std::string& file,
@@ -143,15 +126,15 @@ public:
 // clang-format off
 #define LOGSTREAM_COMMON(...) bpftrace::LogStream(__FILE__, __LINE__, __VA_ARGS__)
 #define LOGSTREAM_DEBUG(...) LOGSTREAM_COMMON(__VA_ARGS__)
-#define LOGSTREAM_INFO(...) LOGSTREAM_COMMON(__VA_ARGS__)
+#define LOGSTREAM_V1(...) LOGSTREAM_COMMON(__VA_ARGS__)
 #define LOGSTREAM_WARNING(...) LOGSTREAM_COMMON(__VA_ARGS__)
 #define LOGSTREAM_ERROR(...) LOGSTREAM_COMMON(__VA_ARGS__)
-#define LOGSTREAM_FATAL(...) bpftrace::LogStreamFatal(__FILE__, __LINE__, __VA_ARGS__)
 #define LOGSTREAM_BUG(...) bpftrace::LogStreamBug(__FILE__, __LINE__, __VA_ARGS__)
 // clang-format on
 
 #define LOG(type, ...) LOGSTREAM_##type(bpftrace::LogType::type, ##__VA_ARGS__)
 
 #define DISABLE_LOG(type) bpftrace::Log::get().disable(LogType::type)
+#define ENABLE_LOG(type) bpftrace::Log::get().enable(LogType::type)
 
 }; // namespace bpftrace

@@ -8,43 +8,12 @@
 #include <optional>
 
 #include "ast/ast.h"
+#include "ast/async_ids.h"
 #include "bpftrace.h"
 #include "types.h"
 
-#if LLVM_VERSION_MAJOR >= 5 && LLVM_VERSION_MAJOR < 7
-#define CREATE_MEMCPY(dst, src, size, algn)                                    \
-  CreateMemCpy((dst), (src), (size), (algn))
-#define CREATE_MEMCPY_VOLATILE(dst, src, size, algn)                           \
-  CreateMemCpy((dst), (src), (size), (algn), true)
-#elif LLVM_VERSION_MAJOR >= 7 && LLVM_VERSION_MAJOR < 10
-#define CREATE_MEMCPY(dst, src, size, algn)                                    \
-  CreateMemCpy((dst), (algn), (src), (algn), (size))
-#define CREATE_MEMCPY_VOLATILE(dst, src, size, algn)                           \
-  CreateMemCpy((dst), (algn), (src), (algn), (size), true)
-#elif LLVM_VERSION_MAJOR >= 10
-#define CREATE_MEMCPY(dst, src, size, algn)                                    \
-  CreateMemCpy((dst), MaybeAlign(algn), (src), MaybeAlign(algn), (size))
-#define CREATE_MEMCPY_VOLATILE(dst, src, size, algn)                           \
-  CreateMemCpy((dst), MaybeAlign(algn), (src), MaybeAlign(algn), (size), true)
-#else
-#error Unsupported LLVM version
-#endif
-
-#if LLVM_VERSION_MAJOR >= 10
-#define CREATE_MEMSET(ptr, val, size, align)                                   \
-  CreateMemSet((ptr), (val), (size), MaybeAlign((align)))
-#else
-#define CREATE_MEMSET(ptr, val, size, align)                                   \
-  CreateMemSet((ptr), (val), (size), (align))
-#endif
-
-#if LLVM_VERSION_MAJOR >= 13
 #define CREATE_ATOMIC_RMW(op, ptr, val, align, order)                          \
   CreateAtomicRMW((op), (ptr), (val), MaybeAlign((align)), (order))
-#else
-#define CREATE_ATOMIC_RMW(op, ptr, val, align, order)                          \
-  CreateAtomicRMW((op), (ptr), (val), (order))
-#endif
 
 #if LLVM_VERSION_MAJOR >= 15
 #define GET_PTR_TY() getPtrTy()
@@ -59,24 +28,25 @@ using namespace llvm;
 
 class IRBuilderBPF : public IRBuilder<> {
 public:
-  IRBuilderBPF(LLVMContext &context, Module &module, BPFtrace &bpftrace);
+  IRBuilderBPF(LLVMContext &context,
+               Module &module,
+               BPFtrace &bpftrace,
+               AsyncIds &async_ids);
 
   AllocaInst *CreateAllocaBPF(llvm::Type *ty, const std::string &name = "");
   AllocaInst *CreateAllocaBPF(const SizedType &stype,
                               const std::string &name = "");
   AllocaInst *CreateAllocaBPFInit(const SizedType &stype,
                                   const std::string &name);
-  AllocaInst *CreateAllocaBPF(llvm::Type *ty,
-                              llvm::Value *arraysize,
-                              const std::string &name = "");
-  AllocaInst *CreateAllocaBPF(const SizedType &stype,
-                              llvm::Value *arraysize,
-                              const std::string &name = "");
   AllocaInst *CreateAllocaBPF(int bytes, const std::string &name = "");
+  void CreateMemsetBPF(Value *ptr, Value *val, uint32_t size);
+  void CreateMemcpyBPF(Value *dst, Value *src, uint32_t size);
   llvm::Type *GetType(const SizedType &stype);
+  llvm::Type *GetMapValueType(const SizedType &stype);
   llvm::ConstantInt *GetIntSameSize(uint64_t C, llvm::Value *expr);
   llvm::ConstantInt *GetIntSameSize(uint64_t C, llvm::Type *ty);
   Value *GetMapVar(const std::string &map_name);
+  Value *GetNull();
   CallInst *CreateMapLookup(Map &map,
                             Value *key,
                             const std::string &name = "lookup_elem");
@@ -89,8 +59,13 @@ public:
                              Value *key,
                              SizedType &type,
                              const location &loc);
+  Value *CreatePerCpuMapAggElems(Value *ctx,
+                                 Map &map,
+                                 Value *key,
+                                 const SizedType &type,
+                                 const location &loc);
   void CreateMapUpdateElem(Value *ctx,
-                           Map &map,
+                           const std::string &map_ident,
                            Value *key,
                            Value *val,
                            const location &loc,
@@ -150,12 +125,7 @@ public:
                                 pid_t pid,
                                 AddrSpace as,
                                 const location &loc);
-  Value *CreateStrncmp(Value *str1,
-                       uint64_t str1_size,
-                       Value *str2,
-                       uint64_t str2_size,
-                       uint64_t n,
-                       bool inverse);
+  Value *CreateStrncmp(Value *str1, Value *str2, uint64_t n, bool inverse);
   Value *CreateStrcontains(Value *val1,
                            uint64_t str1_size,
                            Value *val2,
@@ -185,12 +155,23 @@ public:
   CallInst *CreateGetCpuId(const location &loc);
   CallInst *CreateGetCurrentTask(const location &loc);
   CallInst *CreateGetRandom(const location &loc);
-  CallInst *CreateGetStackId(Value *ctx,
-                             bool ustack,
-                             StackType stack_type,
-                             const location &loc);
-  CallInst *CreateGetFuncIp(const location &loc);
+  CallInst *CreateGetStack(Value *ctx,
+                           bool ustack,
+                           Value *buf,
+                           StackType stack_type,
+                           const location &loc);
+  CallInst *CreateGetFuncIp(Value *ctx, const location &loc);
   CallInst *CreateGetJoinMap(BasicBlock *failure_callback, const location &loc);
+  CallInst *CreateGetStackScratchMap(StackType stack_type,
+                                     BasicBlock *failure_callback,
+                                     const location &loc);
+  CallInst *CreateGetStrScratchMap(int idx,
+                                   BasicBlock *failure_callback,
+                                   const location &loc);
+  Value *CreateGetFmtStringArgsScratchBuffer(const location &loc);
+  Value *CreateTupleScratchBuffer(const location &loc, int key);
+  void CreateCheckSetRecursion(const location &loc, int early_exit_ret);
+  void CreateUnSetRecursion(const location &loc);
   CallInst *CreateHelperCall(libbpf::bpf_func_id func_id,
                              FunctionType *helper_type,
                              ArrayRef<Value *> args,
@@ -252,8 +233,9 @@ public:
                             AllocaInst *data,
                             size_t size);
   void CreatePath(Value *ctx,
-                  AllocaInst *buf,
+                  Value *buf,
                   Value *path,
+                  Value *sz,
                   const location &loc);
   void CreateSeqPrintf(Value *ctx,
                        Value *fmt,
@@ -278,7 +260,6 @@ public:
   // both branches here:
   // BEGIN { if (nsecs > 0) { $a = 1 } else { $a = 2 } print($a); exit() }
   void hoist(const std::function<void()> &functor);
-  int helper_error_id_ = 0;
 
   // Returns the integer type used to represent pointers in traced code.
   llvm::Type *getPointerStorageTy(AddrSpace as);
@@ -286,6 +267,7 @@ public:
 private:
   Module &module_;
   BPFtrace &bpftrace_;
+  AsyncIds &async_ids_;
 
   Value *CreateUSDTReadArgument(Value *ctx,
                                 struct bcc_usdt_argument *argument,
@@ -299,12 +281,26 @@ private:
                             Value *key,
                             PointerType *val_ptr_ty,
                             const std::string &name = "lookup_elem");
+  CallInst *createPerCpuMapLookup(
+      const std::string &map_name,
+      Value *key,
+      Value *cpu,
+      const std::string &name = "lookup_percpu_elem");
+  CallInst *createPerCpuMapLookup(
+      const std::string &map_name,
+      Value *key,
+      Value *cpu,
+      PointerType *val_ptr_ty,
+      const std::string &name = "lookup_percpu_elem");
   CallInst *createGetScratchMap(const std::string &map_name,
                                 const std::string &name,
                                 PointerType *val_ptr_ty,
                                 const location &loc,
                                 BasicBlock *failure_callback,
                                 int key = 0);
+  Value *createScratchBuffer(globalvars::GlobalVar globalvar,
+                             const location &loc,
+                             size_t key = 0);
   libbpf::bpf_func_id selectProbeReadHelper(AddrSpace as, bool str);
 
   llvm::Type *getKernelPointerStorageTy();
@@ -316,6 +312,16 @@ private:
                              Value *data,
                              size_t size,
                              const location *loc = nullptr);
+
+  void createPerCpuSum(AllocaInst *ret, CallInst *call, const SizedType &type);
+  void createPerCpuMinMax(AllocaInst *ret,
+                          AllocaInst *is_ret_set,
+                          CallInst *call,
+                          const SizedType &type);
+  void createPerCpuAvg(AllocaInst *total,
+                       AllocaInst *count,
+                       CallInst *call,
+                       const SizedType &type);
 
   std::map<std::string, StructType *> structs_;
 };

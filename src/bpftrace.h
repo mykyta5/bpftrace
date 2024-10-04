@@ -1,5 +1,7 @@
 #pragma once
 
+#include <time.h>
+
 #include <cstdint>
 #include <iostream>
 #include <map>
@@ -42,34 +44,20 @@ struct symbol {
   uint64_t address;
 };
 
-enum class DebugLevel;
+struct stack_key {
+  int64_t stackid;
+  uint32_t nr_stack_frames;
+};
+
+enum class DebugStage;
 
 // globals
-extern DebugLevel bt_debug;
+extern std::set<DebugStage> bt_debug;
 extern bool bt_quiet;
 extern bool bt_verbose;
-extern bool bt_verbose2;
+extern bool dry_run;
 
-enum class DebugLevel { kNone, kDebug, kFullDebug };
-
-inline DebugLevel operator++(DebugLevel &level, int)
-{
-  switch (level) {
-    case DebugLevel::kNone:
-      level = DebugLevel::kDebug;
-      break;
-    case DebugLevel::kDebug:
-      level = DebugLevel::kFullDebug;
-      break;
-    case DebugLevel::kFullDebug:
-      // NOTE (mmarchini): should be handled by the caller
-      level = DebugLevel::kNone;
-      break;
-    default:
-      break;
-  }
-  return level;
-}
+enum class DebugStage { Ast, Codegen, CodegenOpt, Libbpf, Verifier };
 
 class WildcardException : public std::exception {
 public:
@@ -95,13 +83,15 @@ public:
         feature_(std::make_unique<BPFfeature>(no_feature)),
         probe_matcher_(std::make_unique<ProbeMatcher>(this)),
         ncpus_(get_possible_cpus().size()),
+        max_cpu_id_(get_max_cpu_id()),
         config_(config)
   {
   }
   virtual ~BPFtrace();
-  virtual int add_probe(ast::Probe &p);
-  Probe generateWatchpointSetupProbe(const std::string &func,
-                                     const ast::AttachPoint &ap,
+  virtual int add_probe(const ast::AttachPoint &ap,
+                        const ast::Probe &p,
+                        int usdt_location_idx = 0);
+  Probe generateWatchpointSetupProbe(const ast::AttachPoint &ap,
                                      const ast::Probe &probe);
   int num_probes() const;
   int prerun() const;
@@ -115,12 +105,13 @@ public:
   int zero_map(const BpfMap &map);
   int print_map(const BpfMap &map, uint32_t top, uint32_t div);
   std::string get_stack(int64_t stackid,
+                        uint32_t nr_stack_frames,
                         int pid,
                         int probe_id,
                         bool ustack,
                         StackType stack_type,
                         int indent = 0);
-  std::string resolve_buf(char *buf, size_t size);
+  std::string resolve_buf(const char *buf, size_t size);
   std::string resolve_ksym(uint64_t addr, bool show_offset = false);
   std::string resolve_usym(uint64_t addr,
                            int pid,
@@ -139,8 +130,6 @@ public:
   std::string resolve_mac_address(const uint8_t *mac_addr) const;
   std::string resolve_cgroup_path(uint64_t cgroup_path_id,
                                   uint64_t cgroup_id) const;
-  virtual std::string extract_func_symbols_from_path(
-      const std::string &path) const;
   std::string resolve_probe(uint64_t probe_id) const;
   uint64_t resolve_cgroupid(const std::string &path) const;
   std::vector<std::unique_ptr<IPrintable>> get_arg_values(
@@ -164,6 +153,11 @@ public:
   bool has_btf_data() const;
   Dwarf *get_dwarf(const std::string &filename);
   Dwarf *get_dwarf(const ast::AttachPoint &attachpoint);
+  bool has_dwarf_data() const
+  {
+    return !dwarves_.empty();
+  }
+  void kfunc_recursion_check(ast::Program *prog);
 
   std::string cmd_;
   bool finalize_ = false;
@@ -197,11 +191,12 @@ public:
   bool debug_output_ = false;
   std::optional<struct timespec> boottime_;
   std::optional<struct timespec> delta_taitime_;
-  static constexpr uint32_t rb_loss_cnt_key_ = 0;
-  static constexpr uint64_t rb_loss_cnt_val_ = 0;
+  static constexpr uint32_t event_loss_cnt_key_ = 0;
+  static constexpr uint64_t event_loss_cnt_val_ = 0;
+  bool need_recursion_check_ = false;
 
   static void sort_by_key(
-      std::vector<SizedType> key_args,
+      const SizedType &key,
       std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>
           &values_by_key);
 
@@ -217,11 +212,12 @@ public:
   }
   int ncpus_;
   int online_cpus_;
+  int max_cpu_id_;
   Config config_;
 
 private:
   int run_special_probe(std::string name,
-                        const BpfBytecode &bytecode,
+                        BpfBytecode &bytecode,
                         void (*trigger)(void));
   void *ksyms_{ nullptr };
   // note: exe_sym_ is used when layout is same for all instances of program
@@ -235,12 +231,13 @@ private:
 
   std::vector<std::unique_ptr<AttachedProbe>> attach_usdt_probe(
       Probe &probe,
-      BpfProgram &&program,
+      const BpfProgram &program,
       int pid,
       bool file_activation);
   int setup_output();
   int setup_perf_events();
-  int setup_ringbuf();
+  void setup_ringbuf();
+  int setup_event_loss();
   // when the ringbuf feature is available, enable ringbuf for built-ins like
   // printf, cat.
   bool is_ringbuf_enabled(void) const
@@ -256,16 +253,18 @@ private:
   void teardown_output();
   void poll_output(bool drain = false);
   int poll_perf_events();
-  void handle_ringbuf_loss();
+  void handle_event_loss();
   int print_map_hist(const BpfMap &map, uint32_t top, uint32_t div);
-  int print_map_stats(const BpfMap &map, uint32_t top, uint32_t div);
   static uint64_t read_address_from_output(std::string output);
-  std::vector<uint8_t> find_empty_key(const BpfMap &map) const;
+  std::optional<std::vector<uint8_t>> find_empty_key(const BpfMap &map) const;
   struct bcc_symbol_option &get_symbol_opts();
+  Probe generate_probe(const ast::AttachPoint &ap,
+                       const ast::Probe &p,
+                       int usdt_location_idx = 0);
   bool has_iter_ = false;
   int epollfd_ = -1;
   struct ring_buffer *ringbuf_ = nullptr;
-  uint64_t ringbuf_loss_count_ = 0;
+  uint64_t event_loss_count_ = 0;
 
   // Mapping traceable functions to modules (or "vmlinux") they appear in.
   // Needs to be mutable to allow lazy loading of the mapping from const lookup

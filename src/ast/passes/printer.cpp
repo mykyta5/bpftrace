@@ -6,9 +6,9 @@
 #include <sstream>
 
 #include "ast/ast.h"
+#include "struct.h"
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 void Printer::print(Node *root)
 {
@@ -109,10 +109,8 @@ void Printer::visit(Call &call)
   out_ << indent << "call: " << call.func << type(call.type) << std::endl;
 
   ++depth_;
-  if (call.vargs) {
-    for (Expression *expr : *call.vargs) {
-      expr->accept(*this);
-    }
+  for (Expression *expr : call.vargs) {
+    expr->accept(*this);
   }
   --depth_;
 }
@@ -152,13 +150,11 @@ void Printer::visit(Map &map)
   std::string indent(depth_, ' ');
   out_ << indent << "map: " << map.ident << type(map.type) << std::endl;
 
-  ++depth_;
-  if (map.vargs) {
-    for (Expression *expr : *map.vargs) {
-      expr->accept(*this);
-    }
+  if (map.key_expr) {
+    ++depth_;
+    map.key_expr->accept(*this);
+    --depth_;
   }
-  --depth_;
 }
 
 void Printer::visit(Variable &var)
@@ -180,25 +176,18 @@ void Printer::visit(Binop &binop)
 
 void Printer::visit(Unop &unop)
 {
-  if (unop.is_post_op) {
-    std::string indent(depth_ + 1, ' ');
+  std::string indent(depth_, ' ');
+  out_ << indent << opstr(unop) << type(unop.type) << std::endl;
 
-    unop.expr->accept(*this);
-    out_ << indent << opstr(unop) << std::endl;
-  } else {
-    std::string indent(depth_, ' ');
-    out_ << indent << opstr(unop) << std::endl;
-
-    ++depth_;
-    unop.expr->accept(*this);
-    --depth_;
-  }
+  ++depth_;
+  unop.expr->accept(*this);
+  --depth_;
 }
 
 void Printer::visit(Ternary &ternary)
 {
   std::string indent(depth_, ' ');
-  out_ << indent << "?:" << std::endl;
+  out_ << indent << "?:" << type(ternary.type) << std::endl;
 
   ++depth_;
   ternary.cond->accept(*this);
@@ -210,7 +199,7 @@ void Printer::visit(Ternary &ternary)
 void Printer::visit(FieldAccess &acc)
 {
   std::string indent(depth_, ' ');
-  out_ << indent << "." << std::endl;
+  out_ << indent << "." << type(acc.type) << std::endl;
 
   ++depth_;
   acc.expr->accept(*this);
@@ -225,7 +214,7 @@ void Printer::visit(FieldAccess &acc)
 void Printer::visit(ArrayAccess &arr)
 {
   std::string indent(depth_, ' ');
-  out_ << indent << "[]" << std::endl;
+  out_ << indent << "[]" << type(arr.type) << std::endl;
 
   ++depth_;
   arr.expr->accept(*this);
@@ -246,10 +235,10 @@ void Printer::visit(Cast &cast)
 void Printer::visit(Tuple &tuple)
 {
   std::string indent(depth_, ' ');
-  out_ << indent << "tuple:" << std::endl;
+  out_ << indent << "tuple:" << type(tuple.type) << std::endl;
 
   ++depth_;
-  for (Expression *expr : *tuple.elems)
+  for (Expression *expr : tuple.elems)
     expr->accept(*this);
   --depth_;
 }
@@ -305,13 +294,13 @@ void Printer::visit(If &if_block)
   ++depth_;
   out_ << indent << " then" << std::endl;
 
-  for (Statement *stmt : *if_block.stmts) {
+  for (Statement *stmt : if_block.stmts) {
     stmt->accept(*this);
   }
 
-  if (if_block.else_stmts) {
+  if (!if_block.else_stmts.empty()) {
     out_ << indent << " else" << std::endl;
-    for (Statement *stmt : *if_block.else_stmts) {
+    for (Statement *stmt : if_block.else_stmts) {
       stmt->accept(*this);
     }
   }
@@ -328,7 +317,7 @@ void Printer::visit(Unroll &unroll)
   out_ << indent << " block" << std::endl;
 
   ++depth_;
-  for (Statement *stmt : *unroll.stmts) {
+  for (Statement *stmt : unroll.stmts) {
     stmt->accept(*this);
   }
   depth_ -= 2;
@@ -346,7 +335,7 @@ void Printer::visit(While &while_block)
   ++depth_;
   out_ << indent << " )" << std::endl;
 
-  for (Statement *stmt : *while_block.stmts) {
+  for (Statement *stmt : while_block.stmts) {
     stmt->accept(*this);
   }
 }
@@ -357,13 +346,22 @@ void Printer::visit(For &for_loop)
   out_ << indent << "for" << std::endl;
 
   ++depth_;
+  if (for_loop.ctx_type.IsRecordTy() &&
+      !for_loop.ctx_type.GetFields().empty()) {
+    out_ << indent << " ctx\n";
+    for (const auto &field : for_loop.ctx_type.GetFields()) {
+      out_ << indent << "  " << field.name << type(field.type) << "\n";
+    }
+  }
+
   out_ << indent << " decl\n";
   print(for_loop.decl);
+
   out_ << indent << " expr\n";
   print(for_loop.expr);
 
   out_ << indent << " stmts\n";
-  for (Statement *stmt : *for_loop.stmts) {
+  for (Statement *stmt : for_loop.stmts) {
     print(stmt);
   }
   --depth_;
@@ -376,7 +374,7 @@ void Printer::visit(Config &config)
   out_ << indent << "config" << std::endl;
 
   ++depth_;
-  for (Statement *stmt : *config.stmts) {
+  for (Statement *stmt : config.stmts) {
     stmt->accept(*this);
   }
   --depth_;
@@ -406,12 +404,12 @@ void Printer::visit(Predicate &pred)
 void Printer::visit(AttachPoint &ap)
 {
   std::string indent(depth_, ' ');
-  out_ << indent << ap.name(ap.func) << std::endl;
+  out_ << indent << ap.name() << std::endl;
 }
 
 void Printer::visit(Probe &probe)
 {
-  for (AttachPoint *ap : *probe.attach_points) {
+  for (AttachPoint *ap : probe.attach_points) {
     ap->accept(*this);
   }
 
@@ -419,7 +417,7 @@ void Printer::visit(Probe &probe)
   if (probe.pred) {
     probe.pred->accept(*this);
   }
-  for (Statement *stmt : *probe.stmts) {
+  for (Statement *stmt : probe.stmts) {
     stmt->accept(*this);
   }
   --depth_;
@@ -431,16 +429,16 @@ void Printer::visit(Subprog &subprog)
   out_ << indent << subprog.name() << ": " << subprog.return_type;
 
   out_ << "(";
-  for (size_t i = 0; i < subprog.args->size(); i++) {
-    auto &arg = subprog.args->at(i);
+  for (size_t i = 0; i < subprog.args.size(); i++) {
+    auto &arg = subprog.args.at(i);
     out_ << arg->name() << " : " << arg->type;
-    if (i < subprog.args->size() - 1)
+    if (i < subprog.args.size() - 1)
       out_ << ", ";
   }
   out_ << ")" << std::endl;
 
   ++depth_;
-  for (Statement *stmt : *subprog.stmts) {
+  for (Statement *stmt : subprog.stmts) {
     stmt->accept(*this);
   }
   --depth_;
@@ -461,12 +459,11 @@ void Printer::visit(Program &program)
   }
 
   ++depth_;
-  for (Subprog *subprog : *program.functions)
+  for (Subprog *subprog : program.functions)
     subprog->accept(*this);
-  for (Probe *probe : *program.probes)
+  for (Probe *probe : program.probes)
     probe->accept(*this);
   --depth_;
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

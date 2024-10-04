@@ -1,5 +1,6 @@
 #include "ast/attachpoint_parser.h"
 
+#include "ast.h"
 #include "ast/int_parser.h"
 #include "log.h"
 #include "types.h"
@@ -12,8 +13,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace bpftrace {
-namespace ast {
+namespace bpftrace::ast {
 
 AttachPointParser::State AttachPointParser::argument_count_error(
     int expected,
@@ -51,23 +51,23 @@ std::optional<int64_t> AttachPointParser::stoll(const std::string &str)
   }
 }
 
-AttachPointParser::AttachPointParser(Program *root,
+AttachPointParser::AttachPointParser(ASTContext &ctx,
                                      BPFtrace &bpftrace,
                                      std::ostream &sink,
                                      bool listing)
-    : root_(root), bpftrace_(bpftrace), sink_(sink), listing_(listing)
+    : ctx_(ctx), bpftrace_(bpftrace), sink_(sink), listing_(listing)
 {
 }
 
 int AttachPointParser::parse()
 {
-  if (!root_)
+  if (!ctx_.root)
     return 1;
 
   uint32_t failed = 0;
-  for (Probe *probe : *(root_->probes)) {
-    for (size_t i = 0; i < probe->attach_points->size(); ++i) {
-      auto ap_ptr = (*probe->attach_points)[i];
+  for (Probe *probe : ctx_.root->probes) {
+    for (size_t i = 0; i < probe->attach_points.size(); ++i) {
+      auto ap_ptr = probe->attach_points[i];
       auto &ap = *ap_ptr;
       new_attach_points.clear();
 
@@ -77,14 +77,13 @@ int AttachPointParser::parse()
         LOG(ERROR, ap.loc, sink_) << errs_.str();
       } else if (s == SKIP || s == NEW_APS) {
         // Remove the current attach point
-        delete ap_ptr;
-        probe->attach_points->erase(probe->attach_points->begin() + i);
+        probe->attach_points.erase(probe->attach_points.begin() + i);
         i--;
         if (s == NEW_APS) {
           // The removed attach point is replaced by new ones
-          probe->attach_points->insert(probe->attach_points->end(),
-                                       new_attach_points.begin(),
-                                       new_attach_points.end());
+          probe->attach_points.insert(probe->attach_points.end(),
+                                      new_attach_points.begin(),
+                                      new_attach_points.end());
         }
       }
 
@@ -93,14 +92,14 @@ int AttachPointParser::parse()
       errs_.str({});
     }
 
-    auto new_end = std::remove_if(probe->attach_points->begin(),
-                                  probe->attach_points->end(),
+    auto new_end = std::remove_if(probe->attach_points.begin(),
+                                  probe->attach_points.end(),
                                   [](const AttachPoint *ap) {
                                     return ap->provider.empty();
                                   });
-    probe->attach_points->erase(new_end, probe->attach_points->end());
+    probe->attach_points.erase(new_end, probe->attach_points.end());
 
-    if (probe->attach_points->empty()) {
+    if (probe->attach_points.empty()) {
       LOG(ERROR, probe->loc, sink_) << "No attach points for probe";
       failed++;
     }
@@ -165,7 +164,7 @@ AttachPointParser::State AttachPointParser::parse_attachpoint(AttachPoint &ap)
       // New attach points have ignore_invalid set to true - probe types for
       // which raw_input has invalid number of parts will be ignored (instead
       // of throwing an error)
-      new_attach_points.push_back(new AttachPoint(raw_input, true));
+      new_attach_points.push_back(ctx_.make_node<AttachPoint>(raw_input, true));
     }
     return NEW_APS;
   }
@@ -340,9 +339,17 @@ AttachPointParser::State AttachPointParser::kprobe_parser(bool allow_offset)
     ap_->func = parts_[func_idx];
   }
 
-  if (ap_->func.find('*') != std::string::npos ||
-      ap_->target.find('*') != std::string::npos)
-    ap_->need_expansion = true;
+  // kprobe_multi does not support the "module:function" syntax so in case
+  // a module is specified, always use full expansion
+  if (has_wildcard(ap_->target))
+    ap_->expansion = ExpansionType::FULL;
+  else if (has_wildcard(ap_->func)) {
+    if (ap_->target.empty() && bpftrace_.feature_->has_kprobe_multi()) {
+      ap_->expansion = ExpansionType::MULTI;
+    } else {
+      ap_->expansion = ExpansionType::FULL;
+    }
+  }
 
   return OK;
 }
@@ -440,9 +447,17 @@ AttachPointParser::State AttachPointParser::uprobe_parser(bool allow_offset,
       ap_->func = func;
   }
 
-  if (ap_->target.find('*') != std::string::npos ||
-      ap_->func.find('*') != std::string::npos)
-    ap_->need_expansion = true;
+  // As the C++ language supports function overload, a given function name
+  // (without parameters) could have multiple matches even when no
+  // wildcards are used.
+  if (has_wildcard(ap_->func) || has_wildcard(ap_->target) ||
+      ap_->lang == "cpp") {
+    if (bpftrace_.feature_->has_uprobe_multi()) {
+      ap_->expansion = ExpansionType::MULTI;
+    } else {
+      ap_->expansion = ExpansionType::FULL;
+    }
+  }
 
   return OK;
 }
@@ -477,10 +492,10 @@ AttachPointParser::State AttachPointParser::usdt_parser()
     ap_->func = parts_[3];
   }
 
-  if (ap_->target.find('*') != std::string::npos ||
-      ap_->ns.find('*') != std::string::npos || ap_->ns.empty() ||
-      ap_->func.find('*') != std::string::npos || bpftrace_.pid())
-    ap_->need_expansion = true;
+  // Always fully expand USDT probes as they may access args
+  if (has_wildcard(ap_->target) || has_wildcard(ap_->ns) || ap_->ns.empty() ||
+      has_wildcard(ap_->func) || bpftrace_.pid())
+    ap_->expansion = ExpansionType::FULL;
 
   return OK;
 }
@@ -505,7 +520,7 @@ AttachPointParser::State AttachPointParser::tracepoint_parser()
 
   if (ap_->target.find('*') != std::string::npos ||
       ap_->func.find('*') != std::string::npos)
-    ap_->need_expansion = true;
+    ap_->expansion = ExpansionType::FULL;
 
   return OK;
 }
@@ -627,7 +642,7 @@ AttachPointParser::State AttachPointParser::watchpoint_parser(bool async)
 
     ap_->func = func_arg_parts[0];
     if (ap_->func.find('*') != std::string::npos)
-      ap_->need_expansion = true;
+      ap_->expansion = ExpansionType::FULL;
 
     if (func_arg_parts[1].size() <= 3 || func_arg_parts[1].find("arg") != 0) {
       errs_ << "Invalid function argument" << std::endl;
@@ -696,7 +711,7 @@ AttachPointParser::State AttachPointParser::kfunc_parser()
 
   if (ap_->func.find('*') != std::string::npos ||
       ap_->target.find('*') != std::string::npos)
-    ap_->need_expansion = true;
+    ap_->expansion = ExpansionType::FULL;
 
   return OK;
 }
@@ -714,7 +729,7 @@ AttachPointParser::State AttachPointParser::iter_parser()
 
   if (parts_[1].find('*') != std::string::npos) {
     if (listing_) {
-      ap_->need_expansion = true;
+      ap_->expansion = ExpansionType::FULL;
     } else {
       if (ap_->ignore_invalid)
         return SKIP;
@@ -744,10 +759,9 @@ AttachPointParser::State AttachPointParser::raw_tracepoint_parser()
   ap_->func = parts_[1];
 
   if (has_wildcard(ap_->func))
-    ap_->need_expansion = true;
+    ap_->expansion = ExpansionType::FULL;
 
   return OK;
 }
 
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast

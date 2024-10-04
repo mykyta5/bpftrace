@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <dirent.h>
 #include <fstream>
 #include <iomanip>
@@ -42,6 +43,17 @@ std::set<std::string> ProbeMatcher::get_matches_in_stream(
   bool start_wildcard, end_wildcard;
   auto tokens = get_wildcard_tokens(search_input, start_wildcard, end_wildcard);
 
+  // Since demangled_name contains function parameters, we need to remove
+  // them unless the user specified '(' in the search input (i.e. wants
+  // to match against the parameters explicitly).
+  // Only used for C++ when demangling is enabled.
+  auto has_parameter = [](const std::string& token) {
+    return token.find('(') != std::string::npos;
+  };
+  const bool truncate_parameters = std::none_of(tokens.begin(),
+                                                tokens.end(),
+                                                has_parameter);
+
   std::string line;
   std::set<std::string> matches;
   while (std::getline(symbol_stream, line, delim)) {
@@ -57,23 +69,15 @@ std::set<std::string> ProbeMatcher::get_matches_in_stream(
             continue;
 
           // Match against the demanled name.
-          // Since demangled_name contains function arguments, we need to remove
-          // them unless the user specified '(' in the search input (i.e. wants
-          // to match against the arguments explicitly).
           std::string match_line = prefix + demangled_name;
-          if (std::all_of(tokens.begin(),
-                          tokens.end(),
-                          [&](const std::string& token) {
-                            return token.find("(") == std::string::npos;
-                          })) {
-            match_line = match_line.substr(0, match_line.find_last_of("("));
+          if (truncate_parameters) {
+            erase_parameter_list(match_line);
           }
 
-          if (!wildcard_match(
+          free(demangled_name);
+
+          if (wildcard_match(
                   match_line, tokens, start_wildcard, end_wildcard)) {
-            free(demangled_name);
-          } else {
-            free(demangled_name);
             goto out;
           }
         }
@@ -120,11 +124,11 @@ std::set<std::string> ProbeMatcher::get_matches_for_probetype(
       break;
     }
     case ProbeType::tracepoint: {
-      symbol_stream = get_symbols_from_file_safe(tracefs::available_events());
+      symbol_stream = get_symbols_from_file(tracefs::available_events());
       break;
     }
     case ProbeType::rawtracepoint: {
-      symbol_stream = get_symbols_from_file_safe(tracefs::available_events());
+      symbol_stream = get_symbols_from_file(tracefs::available_events());
       symbol_stream = adjust_rawtracepoint(*symbol_stream);
       break;
     }
@@ -212,8 +216,9 @@ std::unique_ptr<std::istream> ProbeMatcher::get_symbols_from_file(
 {
   auto file = std::make_unique<std::ifstream>(path);
   if (file->fail()) {
-    throw std::runtime_error("Could not read symbols from " + path + ": " +
-                             strerror(errno));
+    LOG(WARNING) << "Could not read symbols from " << path << ": "
+                 << strerror(errno);
+    return nullptr;
   }
 
   return file;
@@ -232,17 +237,6 @@ std::unique_ptr<std::istream> ProbeMatcher::get_symbols_from_traceable_funcs(
     }
   }
   return std::make_unique<std::istringstream>(funcs);
-}
-
-std::unique_ptr<std::istream> ProbeMatcher::get_symbols_from_file_safe(
-    const std::string& path) const
-{
-  try {
-    return get_symbols_from_file(path);
-  } catch (const std::runtime_error& e) {
-    LOG(WARNING) << e.what();
-  }
-  return NULL;
 }
 
 std::unique_ptr<std::istream> ProbeMatcher::get_func_symbols_from_file(
@@ -454,8 +448,8 @@ FuncParamLists ProbeMatcher::get_uprobe_params(
 
 void ProbeMatcher::list_probes(ast::Program* prog)
 {
-  for (auto* probe : *prog->probes) {
-    for (auto* ap : *probe->attach_points) {
+  for (auto* probe : prog->probes) {
+    for (auto* ap : probe->attach_points) {
       auto matches = get_matches_for_ap(*ap);
       auto probe_type = probetype(ap->provider);
       FuncParamLists param_lists;
@@ -486,8 +480,7 @@ void ProbeMatcher::list_probes(ast::Program* prog)
           match_print = target + ":" + ap->lang + ":" + func;
         }
 
-        std::cout << probetypeName(probe_type) << ":" << match_print
-                  << std::endl;
+        std::cout << probe_type << ":" << match_print << std::endl;
         if (bt_verbose) {
           for (auto& param : param_lists[match])
             std::cout << "    " << param << std::endl;

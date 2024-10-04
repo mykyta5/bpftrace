@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "log.h"
+#include "utils.h"
 
 namespace bpftrace {
 
@@ -56,25 +57,32 @@ bool Bitfield::operator!=(const Bitfield &other) const
   return !(*this == other);
 }
 
-std::unique_ptr<Struct> Struct::CreateTuple(std::vector<SizedType> fields)
+// Creates a struct or tuple with the given field types.
+// If field_names is empty then all fields with be created without names.
+std::unique_ptr<Struct> Struct::CreateRecord(
+    const std::vector<SizedType> &fields,
+    const std::vector<std::string_view> &field_names)
 {
+  assert(field_names.empty() || field_names.size() == fields.size());
+
   // See llvm::StructLayout::StructLayout source
-  std::unique_ptr<Struct> tuple(new Struct(0));
+  auto record = std::make_unique<Struct>(0);
   ssize_t offset = 0;
   ssize_t struct_align = 1;
 
-  for (auto &field : fields) {
+  for (size_t i = 0; i < fields.size(); i++) {
+    const auto &field = fields[i];
     auto align = field.GetInTupleAlignment();
     struct_align = std::max(align, struct_align);
     auto size = field.GetSize();
 
     auto padding = (align - (offset % align)) % align;
     if (padding)
-      tuple->padded = true;
+      record->padded = true;
     offset += padding;
 
-    tuple->fields.push_back(Field{
-        .name = "",
+    record->fields.push_back(Field{
+        .name = field_names.empty() ? "" : std::string{ field_names[i] },
         .type = field,
         .offset = offset,
         .bitfield = std::nullopt,
@@ -85,10 +93,16 @@ std::unique_ptr<Struct> Struct::CreateTuple(std::vector<SizedType> fields)
 
   auto padding = (struct_align - (offset % struct_align)) % struct_align;
 
-  tuple->size = offset + padding;
-  tuple->align = struct_align;
+  record->size = offset + padding;
+  record->align = struct_align;
 
-  return tuple;
+  return record;
+}
+
+std::unique_ptr<Struct> Struct::CreateTuple(
+    const std::vector<SizedType> &fields)
+{
+  return CreateRecord(fields, {});
 }
 
 void Struct::Dump(std::ostream &os)
@@ -131,7 +145,7 @@ const Field &Struct::GetField(const std::string &name) const
     if (field.name == name)
       return field;
   }
-  throw std::runtime_error("struct has no field named " + name);
+  throw FatalUserException("struct has no field named " + name);
 }
 
 void Struct::AddField(const std::string &field_name,
@@ -141,11 +155,11 @@ void Struct::AddField(const std::string &field_name,
                       bool is_data_loc)
 {
   if (!HasField(field_name))
-    fields.emplace_back(Field{ .name = field_name,
-                               .type = type,
-                               .offset = offset,
-                               .bitfield = bitfield,
-                               .is_data_loc = is_data_loc });
+    fields.push_back(Field{ .name = field_name,
+                            .type = type,
+                            .offset = offset,
+                            .bitfield = bitfield,
+                            .is_data_loc = is_data_loc });
 }
 
 bool Struct::HasFields() const
@@ -163,7 +177,7 @@ void StructManager::Add(const std::string &name,
                         bool allow_override)
 {
   if (struct_map_.find(name) != struct_map_.end())
-    throw std::runtime_error("Type redefinition: type with name \'" + name +
+    throw FatalUserException("Type redefinition: type with name \'" + name +
                              "\' already exists");
   struct_map_[name] = std::make_unique<Struct>(size, allow_override);
 }
@@ -193,15 +207,24 @@ bool StructManager::Has(const std::string &name) const
   return struct_map_.find(name) != struct_map_.end();
 }
 
-std::weak_ptr<Struct> StructManager::AddTuple(std::vector<SizedType> fields)
+std::weak_ptr<Struct> StructManager::AddAnonymousStruct(
+    const std::vector<SizedType> &fields,
+    const std::vector<std::string_view> &field_names)
 {
-  auto t = tuples_.insert(Struct::CreateTuple(std::move(fields)));
+  auto t = anonymous_types_.insert(Struct::CreateRecord(fields, field_names));
+  return *t.first;
+}
+
+std::weak_ptr<Struct> StructManager::AddTuple(
+    const std::vector<SizedType> &fields)
+{
+  auto t = anonymous_types_.insert(Struct::CreateTuple(fields));
   return *t.first;
 }
 
 size_t StructManager::GetTuplesCnt() const
 {
-  return tuples_.size();
+  return anonymous_types_.size();
 }
 
 const Field *StructManager::GetProbeArg(const ast::Probe &probe,

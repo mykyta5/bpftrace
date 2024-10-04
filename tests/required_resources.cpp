@@ -9,8 +9,7 @@
 #include "struct.h"
 #include "types.h"
 
-namespace bpftrace {
-namespace test {
+namespace bpftrace::test {
 
 // ========================================================================
 // It's a bit overkill to completely test every field in `RequiredResources`
@@ -65,10 +64,13 @@ TEST(required_resources, round_trip_field_sized_type)
     EXPECT_TRUE(field.type.IsIntTy());
     EXPECT_EQ(field.type.GetSize(), 4ul);
     EXPECT_EQ(field.offset, 123);
-    EXPECT_TRUE(field.bitfield.has_value());
+    // clang-tidy does not recognize ASSERT_*() terminates testcase
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    ASSERT_TRUE(field.bitfield.has_value());
     EXPECT_EQ(field.bitfield->read_bytes, 1ul);
     EXPECT_EQ(field.bitfield->access_rshift, 2ul);
     EXPECT_EQ(field.bitfield->mask, 0xFFul);
+    // NOLINTEND(bugprone-unchecked-optional-access)
   }
 }
 
@@ -77,7 +79,7 @@ TEST(required_resources, round_trip_map_info)
   std::ostringstream serialized(std::ios::binary);
   {
     MapInfo info{
-      .key = MapKey(),
+      .key_type = CreateNone(),
       .value_type = CreateInet(3),
       .lhist_args =
           LinearHistogramArgs{
@@ -87,7 +89,7 @@ TEST(required_resources, round_trip_map_info)
           },
       .hist_bits_arg = 1,
     };
-    info.key.args_.push_back(CreateInt32());
+    info.key_type = CreateInt32();
     RequiredResources r;
     r.maps_info.insert({ "mymap", info });
     r.save_state(serialized);
@@ -104,42 +106,19 @@ TEST(required_resources, round_trip_map_info)
     EXPECT_TRUE(map_info.value_type.IsInetTy());
     EXPECT_EQ(map_info.value_type.GetSize(), 3ul);
 
-    EXPECT_EQ(map_info.key.args_.size(), 1);
-    EXPECT_TRUE(map_info.key.args_[0].IsIntegerTy());
-    EXPECT_EQ(map_info.key.args_[0].GetSize(), 4);
+    EXPECT_TRUE(map_info.key_type.IsIntegerTy());
+    EXPECT_EQ(map_info.key_type.GetSize(), 4);
 
-    EXPECT_TRUE(map_info.lhist_args.has_value());
+    // clang-tidy does not recognize ASSERT_*() terminates testcase
+    // NOLINTBEGIN(bugprone-unchecked-optional-access)
+    ASSERT_TRUE(map_info.lhist_args.has_value());
     EXPECT_EQ(map_info.lhist_args->min, 99);
     EXPECT_EQ(map_info.lhist_args->max, 123);
     EXPECT_EQ(map_info.lhist_args->step, 33);
+    // NOLINTEND(bugprone-unchecked-optional-access)
 
     EXPECT_TRUE(map_info.hist_bits_arg.has_value());
     EXPECT_EQ(map_info.hist_bits_arg, 1);
-  }
-}
-
-TEST(required_resources, round_trip_set_stack_type)
-{
-  std::ostringstream serialized(std::ios::binary);
-  {
-    RequiredResources r;
-    r.stackid_maps.insert(StackType{
-        .limit = 33,
-        .mode = StackMode::perf,
-    });
-    r.save_state(serialized);
-  }
-
-  std::istringstream input(serialized.str());
-  {
-    RequiredResources r;
-    r.load_state(input);
-
-    ASSERT_EQ(r.stackid_maps.size(), 1ul);
-    for (const auto &st : r.stackid_maps) {
-      EXPECT_EQ(st.limit, 33ul);
-      EXPECT_EQ(st.mode, StackMode::perf);
-    }
   }
 }
 
@@ -177,11 +156,7 @@ TEST(required_resources, round_trip_multiple_members)
   {
     RequiredResources r;
     r.join_args.emplace_back("joinarg0");
-    r.stackid_maps.insert(StackType{
-        .limit = 33,
-        .mode = StackMode::perf,
-    });
-    r.needs_elapsed_map = true;
+    r.time_args.emplace_back("timearg0");
     r.save_state(serialized);
   }
 
@@ -192,14 +167,9 @@ TEST(required_resources, round_trip_multiple_members)
 
     ASSERT_EQ(r.join_args.size(), 1ul);
     EXPECT_EQ(r.join_args[0], "joinarg0");
-    ASSERT_EQ(r.stackid_maps.size(), 1ul);
-    for (const auto &st : r.stackid_maps) {
-      EXPECT_EQ(st.limit, 33ul);
-      EXPECT_EQ(st.mode, StackMode::perf);
-    }
-    EXPECT_TRUE(r.needs_elapsed_map);
+    ASSERT_EQ(r.time_args.size(), 1ul);
+    EXPECT_EQ(r.time_args[0], "timearg0");
   }
 }
 
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test

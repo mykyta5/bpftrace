@@ -1,13 +1,11 @@
-#include <limits.h>
+#include <climits>
 #include <sstream>
 
 #include "ast/passes/printer.h"
 #include "driver.h"
 #include "gtest/gtest.h"
 
-namespace bpftrace {
-namespace test {
-namespace parser {
+namespace bpftrace::test::parser {
 
 using Printer = ast::Printer;
 
@@ -42,7 +40,7 @@ void test(BPFtrace &bpftrace, std::string_view input, std::string_view expected)
 
   std::ostringstream out;
   Printer printer(out);
-  printer.print(driver.root.get());
+  printer.print(driver.ctx.root);
   EXPECT_EQ(expected, out.str());
 }
 
@@ -679,9 +677,21 @@ TEST(Parser, map_key)
        "   int: 1\n"
        "  =\n"
        "   map: @x\n"
-       "    int: 0\n"
-       "    int: 1\n"
-       "    int: 2\n"
+       "    tuple:\n"
+       "     int: 0\n"
+       "     int: 1\n"
+       "     int: 2\n"
+       "   int: 1\n");
+
+  test("kprobe:sys_open { @x[(0,\"hi\",tid)] = 1; }",
+       "Program\n"
+       " kprobe:sys_open\n"
+       "  =\n"
+       "   map: @x\n"
+       "    tuple:\n"
+       "     int: 0\n"
+       "     string: hi\n"
+       "     builtin: tid\n"
        "   int: 1\n");
 
   test("kprobe:sys_open { @x[@a] = 1; @x[@a,@b,@c] = 1; }",
@@ -693,9 +703,10 @@ TEST(Parser, map_key)
        "   int: 1\n"
        "  =\n"
        "   map: @x\n"
-       "    map: @a\n"
-       "    map: @b\n"
-       "    map: @c\n"
+       "    tuple:\n"
+       "     map: @a\n"
+       "     map: @b\n"
+       "     map: @c\n"
        "   int: 1\n");
 
   test("kprobe:sys_open { @x[pid] = 1; @x[tid,uid,arg9] = 1; }",
@@ -707,9 +718,10 @@ TEST(Parser, map_key)
        "   int: 1\n"
        "  =\n"
        "   map: @x\n"
-       "    builtin: tid\n"
-       "    builtin: uid\n"
-       "    builtin: arg9\n"
+       "    tuple:\n"
+       "     builtin: tid\n"
+       "     builtin: uid\n"
+       "     builtin: arg9\n"
        "   int: 1\n");
 }
 
@@ -771,22 +783,22 @@ TEST(Parser, variable_post_increment_decrement)
   test("kprobe:sys_open { $x++; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  variable: $x\n"
-       "   ++\n");
+       "  ++ (post)\n"
+       "   variable: $x\n");
   test("kprobe:sys_open { ++$x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  ++\n"
+       "  ++ (pre)\n"
        "   variable: $x\n");
   test("kprobe:sys_open { $x--; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  variable: $x\n"
-       "   --\n");
+       "  -- (post)\n"
+       "   variable: $x\n");
   test("kprobe:sys_open { --$x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  --\n"
+       "  -- (pre)\n"
        "   variable: $x\n");
 }
 
@@ -795,22 +807,22 @@ TEST(Parser, map_increment_decrement)
   test("kprobe:sys_open { @x++; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  map: @x\n"
-       "   ++\n");
+       "  ++ (post)\n"
+       "   map: @x\n");
   test("kprobe:sys_open { ++@x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  ++\n"
+       "  ++ (pre)\n"
        "   map: @x\n");
   test("kprobe:sys_open { @x--; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  map: @x\n"
-       "   --\n");
+       "  -- (post)\n"
+       "   map: @x\n");
   test("kprobe:sys_open { --@x; }",
        "Program\n"
        " kprobe:sys_open\n"
-       "  --\n"
+       "  -- (pre)\n"
        "   map: @x\n");
 }
 
@@ -1059,7 +1071,7 @@ TEST(Parser, unroll)
 
 TEST(Parser, ternary_str)
 {
-  test("kprobe:sys_open { @x = pid < 10000 ? \"lo\" : \"high\" }",
+  test(R"(kprobe:sys_open { @x = pid < 10000 ? "lo" : "high" })",
        "Program\n"
        " kprobe:sys_open\n"
        "  =\n"
@@ -1236,7 +1248,7 @@ TEST(Parser, usdt)
   // Without the escapes needed for C++ to compile:
   //    usdt:/my/program:"\"probe\"" { 1; }
   //
-  test("usdt:/my/program:\"\\\"probe\\\"\" { 1; }",
+  test(R"(usdt:/my/program:"\"probe\"" { 1; })",
        "Program\n"
        " usdt:/my/program:\"probe\"\n"
        "  int: 1\n");
@@ -1796,16 +1808,25 @@ TEST(Parser, cast_simple_type_pointer)
 
 TEST(Parser, cast_sized_type)
 {
-  test("kprobe:sys_read { (str_t[1])arg0; }",
+  test("kprobe:sys_read { (string)arg0; }",
        "Program\n"
        " kprobe:sys_read\n"
-       "  (string[1])\n"
+       "  (string[0])\n"
        "   builtin: arg0\n");
 }
 
 TEST(Parser, cast_sized_type_pointer)
 {
-  test("kprobe:sys_read { (str_t[1] *)arg0; }",
+  test("kprobe:sys_read { (string *)arg0; }",
+       "Program\n"
+       " kprobe:sys_read\n"
+       "  (string[0] *)\n"
+       "   builtin: arg0\n");
+}
+
+TEST(Parser, cast_sized_type_pointer_with_size)
+{
+  test("kprobe:sys_read { (string[1] *)arg0; }",
        "Program\n"
        " kprobe:sys_read\n"
        "  (string[1] *)\n"
@@ -2063,6 +2084,16 @@ TEST(Parser, cstruct)
        "  int: 1\n");
 }
 
+TEST(Parser, cstruct_semicolon)
+{
+  test("struct Foo { int x, y; char *str; }; kprobe:sys_read { 1; }",
+       "struct Foo { int x, y; char *str; };;\n"
+       "\n"
+       "Program\n"
+       " kprobe:sys_read\n"
+       "  int: 1\n");
+}
+
 TEST(Parser, cstruct_nested)
 {
   test("struct Foo { struct { int x; } bar; } kprobe:sys_read { 1; }",
@@ -2080,7 +2111,7 @@ TEST(Parser, unexpected_symbol)
   Driver driver(bpftrace, out);
   EXPECT_EQ(driver.parse_str("i:s:1 { < }"), 1);
   std::string expected =
-      R"(stdin:1:9-10: ERROR: syntax error, unexpected <, expecting }
+      R"(stdin:1:9-10: ERROR: syntax error, unexpected <
 i:s:1 { < }
         ~
 )";
@@ -2111,7 +2142,7 @@ TEST(Parser, unterminated_string)
       R"(stdin:1:12-19: ERROR: unterminated string
 kprobe:f { "asdf }
            ~~~~~~~
-stdin:1:12-19: ERROR: syntax error, unexpected end of file, expecting }
+stdin:1:12-19: ERROR: syntax error, unexpected end of file
 kprobe:f { "asdf }
            ~~~~~~~
 )";
@@ -2187,7 +2218,7 @@ uretprobe:/bin/sh:f+0x10 { 1 }
 TEST(Parser, invalid_increment_decrement)
 {
   test_parse_failure("i:s:1 { @=5++}", R"(
-stdin:1:9-14: ERROR: syntax error, unexpected ++, expecting }
+stdin:1:9-14: ERROR: syntax error, unexpected ++, expecting ; or }
 i:s:1 { @=5++}
         ~~~~~
 )");
@@ -2199,7 +2230,7 @@ i:s:1 { @=++5}
 )");
 
   test_parse_failure("i:s:1 { @=5--}", R"(
-stdin:1:9-14: ERROR: syntax error, unexpected --, expecting }
+stdin:1:9-14: ERROR: syntax error, unexpected --, expecting ; or }
 i:s:1 { @=5--}
         ~~~~~
 )");
@@ -2211,7 +2242,7 @@ i:s:1 { @=--5}
 )");
 
   test_parse_failure("i:s:1 { @=\"a\"++}", R"(
-stdin:1:9-16: ERROR: syntax error, unexpected ++, expecting }
+stdin:1:9-16: ERROR: syntax error, unexpected ++, expecting ; or }
 i:s:1 { @="a"++}
         ~~~~~~~
 )");
@@ -2360,8 +2391,8 @@ TEST(Parser, while_loop)
     variable: $a
     int: 10
    )
-    variable: $a
-     ++
+    ++ (post)
+     variable: $a
 )PROG");
 }
 
@@ -2382,7 +2413,7 @@ i:s:1 { @x = (1, 2); $x.1 = 1; }
 TEST(Parser, tuple_assignment_error)
 {
   test_parse_failure("i:s:1 { (1, 0) = 0 }", R"(
-stdin:1:16-17: ERROR: syntax error, unexpected =, expecting }
+stdin:1:16-17: ERROR: syntax error, unexpected =, expecting ; or }
 i:s:1 { (1, 0) = 0 }
                ~
 )");
@@ -2399,7 +2430,7 @@ i:s:1 { ((1, 0), 3).0 = (0, 1) }
         ~~~~~~~~~~~~~~~~~~~~~~
 )");
 
-  test_parse_failure("i:s:1 { (1, \"two\", (3, 4)).5 = \"six\"; }", R"(
+  test_parse_failure(R"(i:s:1 { (1, "two", (3, 4)).5 = "six"; })", R"(
 stdin:1:9-37: ERROR: Tuples are immutable once created. Consider creating a new tuple and assigning it instead.
 i:s:1 { (1, "two", (3, 4)).5 = "six"; }
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2515,13 +2546,13 @@ i:s:1 { exit(); } config = { BPFTRACE_STACK_MODE=perf }
 )");
 
   test_parse_failure("config = { exit(); } i:s:1 { exit(); }", R"(
-stdin:1:12-16: ERROR: syntax error, unexpected call, expecting }
+stdin:1:12-16: ERROR: syntax error, unexpected call, expecting } or identifier
 config = { exit(); } i:s:1 { exit(); }
            ~~~~
 )");
 
   test_parse_failure("config = { @start = nsecs; } i:s:1 { exit(); }", R"(
-stdin:1:12-18: ERROR: syntax error, unexpected map, expecting }
+stdin:1:12-18: ERROR: syntax error, unexpected map, expecting } or identifier
 config = { @start = nsecs; } i:s:1 { exit(); }
            ~~~~~~
 )");
@@ -2537,7 +2568,7 @@ BEGIN { @start = nsecs; } config = { BPFTRACE_STACK_MODE=perf } i:s:1 { exit(); 
   test_parse_failure("config = { BPFTRACE_STACK_MODE=perf "
                      "BPFTRACE_MAX_PROBES=2 } i:s:1 { exit(); }",
                      R"(
-stdin:1:37-56: ERROR: syntax error, unexpected identifier, expecting }
+stdin:1:37-56: ERROR: syntax error, unexpected identifier, expecting ; or }
 config = { BPFTRACE_STACK_MODE=perf BPFTRACE_MAX_PROBES=2 } i:s:1 { exit(); }
                                     ~~~~~~~~~~~~~~~~~~~
 )");
@@ -2545,7 +2576,7 @@ config = { BPFTRACE_STACK_MODE=perf BPFTRACE_MAX_PROBES=2 } i:s:1 { exit(); }
   test_parse_failure("config = { BPFTRACE_STACK_MODE=perf } i:s:1 { "
                      "BPFTRACE_MAX_PROBES=2; exit(); }",
                      R"(
-stdin:1:47-67: ERROR: syntax error, unexpected =, expecting }
+stdin:1:47-67: ERROR: syntax error, unexpected =, expecting ; or }
 config = { BPFTRACE_STACK_MODE=perf } i:s:1 { BPFTRACE_MAX_PROBES=2; exit(); }
                                               ~~~~~~~~~~~~~~~~~~~~
 )");
@@ -2618,19 +2649,19 @@ TEST(Parser, subprog_one_arg)
 {
   test("fn f($a : uint8): void {}",
        "Program\n"
-       " f: void($a : unsigned int8)\n");
+       " f: void($a : uint8)\n");
 }
 
 TEST(Parser, subprog_two_args)
 {
   test("fn f($a : uint8, $b : uint8): void {}",
        "Program\n"
-       " f: void($a : unsigned int8, $b : unsigned int8)\n");
+       " f: void($a : uint8, $b : uint8)\n");
 }
 
 TEST(Parser, subprog_string_arg)
 {
-  test("fn f($a : str_t[16]): void {}",
+  test("fn f($a : string[16]): void {}",
        "Program\n"
        " f: void($a : string[16])\n");
 }
@@ -2679,7 +2710,7 @@ TEST(Parser, subprog_return)
 
 TEST(Parser, subprog_string)
 {
-  test("fn f(): str_t[16] {}",
+  test("fn f(): string[16] {}",
        "Program\n"
        " f: string[16]()\n");
 }
@@ -2736,6 +2767,4 @@ BEGIN { for (@kv : @map) { } }
 )");
 }
 
-} // namespace parser
-} // namespace test
-} // namespace bpftrace
+} // namespace bpftrace::test::parser

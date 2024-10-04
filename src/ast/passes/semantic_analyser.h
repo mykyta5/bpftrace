@@ -16,12 +16,12 @@ namespace ast {
 
 class SemanticAnalyser : public Visitor {
 public:
-  explicit SemanticAnalyser(Node *root,
+  explicit SemanticAnalyser(ASTContext &ctx,
                             BPFtrace &bpftrace,
                             std::ostream &out = std::cerr,
                             bool has_child = true,
                             bool listing = false)
-      : root_(root),
+      : ctx_(ctx),
         bpftrace_(bpftrace),
         out_(out),
         listing_(listing),
@@ -29,17 +29,34 @@ public:
   {
   }
 
-  explicit SemanticAnalyser(Node *root, BPFtrace &bpftrace, bool has_child)
-      : SemanticAnalyser(root, bpftrace, std::cerr, has_child)
+  explicit SemanticAnalyser(ASTContext &ctx, BPFtrace &bpftrace, bool has_child)
+      : SemanticAnalyser(ctx, bpftrace, std::cerr, has_child)
   {
   }
 
-  explicit SemanticAnalyser(Node *root,
+  explicit SemanticAnalyser(ASTContext &ctx,
                             BPFtrace &bpftrace,
                             bool has_child,
                             bool listing)
-      : SemanticAnalyser(root, bpftrace, std::cerr, has_child, listing)
+      : SemanticAnalyser(ctx, bpftrace, std::cerr, has_child, listing)
   {
+  }
+
+  [[deprecated("Use Visit(Node *const &n) instead.")]]
+  virtual inline void Visit(Node &n) override
+  {
+    n.accept(*this);
+  }
+
+  virtual inline void Visit(Node *const &n)
+  {
+    n->accept(*this);
+  }
+
+  virtual inline void Visit(Expression *&expr)
+  {
+    expr->accept(*this);
+    dereference_if_needed(expr);
   }
 
   void visit(Integer &integer) override;
@@ -79,7 +96,7 @@ public:
   int analyse();
 
 private:
-  Node *root_ = nullptr;
+  ASTContext &ctx_;
   BPFtrace &bpftrace_;
   std::ostream &out_;
   std::ostringstream err_;
@@ -93,8 +110,10 @@ private:
                         bool want_map,
                         bool want_var,
                         bool want_map_key);
-  bool check_nargs(const Call &call, size_t expected_nargs);
-  bool check_varargs(const Call &call, size_t min_nargs, size_t max_nargs);
+  [[nodiscard]] bool check_nargs(const Call &call, size_t expected_nargs);
+  [[nodiscard]] bool check_varargs(const Call &call,
+                                   size_t min_nargs,
+                                   size_t max_nargs);
   bool check_arg(const Call &call,
                  Type type,
                  int arg_num,
@@ -110,10 +129,12 @@ private:
                               std::string name = "");
 
   SizedType *get_map_type(const Map &map);
-  MapKey *get_map_key_type(const Map &map);
+  SizedType *get_map_key_type(const Map &map);
   void assign_map_type(const Map &map, const SizedType &type);
-  void update_key_type(const Map &map, const MapKey &new_key);
+  SizedType create_key_type(const SizedType &expr_type, const location &loc);
+  void update_key_type(const Map &map, const SizedType &new_key_type);
   bool update_string_size(SizedType &type, const SizedType &new_type);
+  void validate_map_key(const SizedType &key, const location &loc);
   void resolve_struct_type(SizedType &type, const location &loc);
 
   void builtin_args_tracepoint(AttachPoint *attach_point, Builtin &builtin);
@@ -123,13 +144,14 @@ private:
   void binop_ptr(Binop &op);
   void binop_int(Binop &op);
   void binop_array(Binop &op);
+  void dereference_if_needed(Expression *&expr);
 
   bool has_error() const;
   bool in_loop(void)
   {
     return loop_depth_ > 0;
   };
-  void accept_statements(StatementList *stmts);
+  void accept_statements(StatementList &stmts);
 
   Scope *scope_;
 
@@ -141,7 +163,7 @@ private:
 
   std::map<Scope *, std::map<std::string, SizedType>> variable_val_;
   std::map<std::string, SizedType> map_val_;
-  std::map<std::string, MapKey> map_key_;
+  std::map<std::string, SizedType> map_key_;
 
   uint32_t loop_depth_ = 0;
   bool has_begin_probe_ = false;

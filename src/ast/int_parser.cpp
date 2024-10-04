@@ -98,14 +98,12 @@ std::variant<T, std::string> _parse_exp(const std::string &coeff,
     return errmsg.str();
   }
 
-  return c * (T)_ten_pow(e);
+  return c * static_cast<T>(_ten_pow(e));
 }
 
 } // namespace
 
-namespace bpftrace {
-namespace ast {
-namespace int_parser {
+namespace bpftrace::ast::int_parser {
 
 template <typename T>
 T to_int(const std::string &num, int base)
@@ -143,6 +141,4 @@ uint64_t to_uint(const std::string &num, int base)
   return to_int<uint64_t>(num, base);
 }
 
-} // namespace int_parser
-} // namespace ast
-} // namespace bpftrace
+} // namespace bpftrace::ast::int_parser

@@ -3,6 +3,7 @@
 #include <cassert>
 #include <map>
 #include <memory>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -23,22 +24,23 @@ enum class Type : uint8_t {
   // clang-format off
   none,
   voidtype,
-  integer,
+  integer, // int is a protected keyword
   pointer,
+  reference,
   record, // struct/union, as struct is a protected keyword
-  hist,
-  lhist,
-  count,
-  sum,
-  min,
-  max,
-  avg,
-  stats,
-  kstack,
-  ustack,
+  hist_t,
+  lhist_t,
+  count_t,
+  sum_t,
+  min_t,
+  max_t,
+  avg_t,
+  stats_t,
+  kstack_t,
+  ustack_t,
   string,
-  ksym,
-  usym,
+  ksym_t,
+  usym_t,
   probe,
   username,
   inet,
@@ -48,8 +50,8 @@ enum class Type : uint8_t {
   tuple,
   timestamp,
   mac_address,
-  cgroup_path,
-  strerror,
+  cgroup_path_t,
+  strerror_t,
   timestamp_mode,
   // clang-format on
 };
@@ -58,6 +60,7 @@ enum class AddrSpace : uint8_t {
   none,
   kernel,
   user,
+  bpf,
 };
 
 std::ostream &operator<<(std::ostream &os, Type type);
@@ -94,6 +97,12 @@ struct StackType {
   {
     return "stack_" + STACK_MODE_NAME_MAP.at(mode) + "_" +
            std::to_string(limit);
+  }
+
+  static const std::string &scratch_name()
+  {
+    static const std::string scratch_name = "stack_scratch";
+    return scratch_name;
   }
 
 private:
@@ -147,7 +156,9 @@ private:
                                        // StructManager
   AddrSpace as_ = AddrSpace::none;
   bool is_signed_ = false;
-  bool ctx_ = false; // Is bpf program context
+  bool ctx_ = false;                                   // Is bpf program context
+  std::unordered_set<std::string> btf_type_tags_ = {}; // Only populated for
+                                                       // Type::pointer
 
   friend class cereal::access;
   template <typename Archive>
@@ -200,6 +211,18 @@ public:
     as_ = as;
   }
 
+  void SetBtfTypeTags(std::unordered_set<std::string> &&tags)
+  {
+    assert(IsPtrTy());
+    btf_type_tags_ = std::move(tags);
+  }
+
+  const std::unordered_set<std::string> &GetBtfTypeTags() const
+  {
+    assert(IsPtrTy());
+    return btf_type_tags_;
+  }
+
   bool IsCtxAccess() const
   {
     return ctx_;
@@ -218,6 +241,9 @@ public:
   bool operator==(const SizedType &t) const;
   bool operator!=(const SizedType &t) const;
   bool IsSameType(const SizedType &t) const;
+  // This is primarily for Tuples which have equal total size (due to padding)
+  // but their individual elements have different sizes.
+  bool IsSameSizeRecursive(const SizedType &t) const;
   bool FitsInto(const SizedType &t) const;
 
   bool IsPrintableTy()
@@ -234,13 +260,27 @@ public:
     return size_bits_ / 8;
   }
 
-  void SetSize(size_t size)
+  void SetSize(size_t byte_size)
   {
-    size_bits_ = size * 8;
-    if (IsIntTy()) {
-      assert(size == 0 || size == 1 || size == 8 || size == 16 || size == 32 ||
-             size == 64);
-    }
+    if (IsIntTy())
+      SetIntBitWidth(byte_size * 8);
+    else
+      size_bits_ = byte_size * 8;
+  }
+
+  void SetIntBitWidth(size_t bits)
+  {
+    assert(IsIntTy());
+    // Truncate integers too large to fit in BPF registers (64-bits).
+    if (bits > 64)
+      bits = 64;
+    // Zero sized integers are not usually valid. However, during semantic
+    // analysis when we're inferring types, the first pass may not have
+    // enough information to figure out the exact size of the integer. Later
+    // passes infer the exact size.
+    assert(bits == 0 || bits == 1 || bits == 8 || bits == 16 || bits == 32 ||
+           bits == 64);
+    size_bits_ = bits;
   }
 
   size_t GetIntBitWidth() const
@@ -278,6 +318,12 @@ public:
     return element_type_.get();
   }
 
+  const SizedType *GetDereferencedTy() const
+  {
+    assert(IsRefTy());
+    return element_type_.get();
+  }
+
   bool IsBoolTy() const
   {
     return type_ == Type::integer && size_bits_ == 1;
@@ -285,6 +331,10 @@ public:
   bool IsPtrTy() const
   {
     return type_ == Type::pointer;
+  };
+  bool IsRefTy() const
+  {
+    return type_ == Type::reference;
   };
   bool IsIntTy() const
   {
@@ -304,43 +354,43 @@ public:
   };
   bool IsHistTy(void) const
   {
-    return type_ == Type::hist;
+    return type_ == Type::hist_t;
   };
   bool IsLhistTy(void) const
   {
-    return type_ == Type::lhist;
+    return type_ == Type::lhist_t;
   };
   bool IsCountTy(void) const
   {
-    return type_ == Type::count;
+    return type_ == Type::count_t;
   };
   bool IsSumTy(void) const
   {
-    return type_ == Type::sum;
+    return type_ == Type::sum_t;
   };
   bool IsMinTy(void) const
   {
-    return type_ == Type::min;
+    return type_ == Type::min_t;
   };
   bool IsMaxTy(void) const
   {
-    return type_ == Type::max;
+    return type_ == Type::max_t;
   };
   bool IsAvgTy(void) const
   {
-    return type_ == Type::avg;
+    return type_ == Type::avg_t;
   };
   bool IsStatsTy(void) const
   {
-    return type_ == Type::stats;
+    return type_ == Type::stats_t;
   };
   bool IsKstackTy(void) const
   {
-    return type_ == Type::kstack;
+    return type_ == Type::kstack_t;
   };
   bool IsUstackTy(void) const
   {
-    return type_ == Type::ustack;
+    return type_ == Type::ustack_t;
   };
   bool IsStringTy(void) const
   {
@@ -348,11 +398,11 @@ public:
   };
   bool IsKsymTy(void) const
   {
-    return type_ == Type::ksym;
+    return type_ == Type::ksym_t;
   };
   bool IsUsymTy(void) const
   {
-    return type_ == Type::usym;
+    return type_ == Type::usym_t;
   };
   bool IsProbeTy(void) const
   {
@@ -396,19 +446,37 @@ public:
   };
   bool IsCgroupPathTy(void) const
   {
-    return type_ == Type::cgroup_path;
+    return type_ == Type::cgroup_path_t;
   };
   bool IsStrerrorTy(void) const
   {
-    return type_ == Type::strerror;
+    return type_ == Type::strerror_t;
   };
   bool IsTimestampModeTy(void) const
   {
     return type_ == Type::timestamp_mode;
   }
+  bool IsCastableMapTy() const
+  {
+    return type_ == Type::count_t || type_ == Type::sum_t ||
+           type_ == Type::max_t || type_ == Type::min_t || type_ == Type::avg_t;
+  }
+  bool IsMapIterableTy() const
+  {
+    return !(type_ == Type::hist_t || type_ == Type::lhist_t ||
+             type_ == Type::stats_t);
+  }
+
+  bool NeedsPercpuMap() const;
 
   friend std::ostream &operator<<(std::ostream &, const SizedType &);
   friend std::ostream &operator<<(std::ostream &, Type);
+
+  void IntoPointer()
+  {
+    assert(IsRefTy());
+    type_ = Type::pointer;
+  }
 
   // Factories
 
@@ -416,6 +484,7 @@ public:
                                const SizedType &element_type);
 
   friend SizedType CreatePointer(const SizedType &pointee_type, AddrSpace as);
+  friend SizedType CreateReference(const SizedType &pointee_type, AddrSpace as);
   friend SizedType CreateRecord(const std::string &name,
                                 std::weak_ptr<Struct> record);
   friend SizedType CreateInteger(size_t bits, bool is_signed);
@@ -442,6 +511,8 @@ SizedType CreateString(size_t size);
 SizedType CreateArray(size_t num_elements, const SizedType &element_type);
 SizedType CreatePointer(const SizedType &pointee_type,
                         AddrSpace as = AddrSpace::none);
+SizedType CreateReference(const SizedType &referred_type,
+                          AddrSpace as = AddrSpace::none);
 
 SizedType CreateRecord(const std::string &name, std::weak_ptr<Struct> record);
 SizedType CreateTuple(std::weak_ptr<Struct> tuple);
@@ -505,26 +576,54 @@ struct ProbeItem {
 };
 
 const std::vector<ProbeItem> PROBE_LIST = {
-  { "kprobe", { "k" }, ProbeType::kprobe, .show_in_kernel_list = true },
-  { "kretprobe", { "kr" }, ProbeType::kretprobe },
-  { "uprobe", { "u" }, ProbeType::uprobe, .show_in_userspace_list = true },
-  { "uretprobe", { "ur" }, ProbeType::uretprobe },
-  { "usdt", { "U" }, ProbeType::usdt, .show_in_userspace_list = true },
-  { "BEGIN", { "BEGIN" }, ProbeType::special },
-  { "END", { "END" }, ProbeType::special },
-  { "tracepoint", { "t" }, ProbeType::tracepoint, .show_in_kernel_list = true },
-  { "profile", { "p" }, ProbeType::profile },
-  { "interval", { "i" }, ProbeType::interval },
-  { "software", { "s" }, ProbeType::software, .show_in_kernel_list = true },
-  { "hardware", { "h" }, ProbeType::hardware, .show_in_kernel_list = true },
-  { "watchpoint", { "w" }, ProbeType::watchpoint },
-  { "asyncwatchpoint", { "aw" }, ProbeType::asyncwatchpoint },
-  { "kfunc", { "f", "fentry" }, ProbeType::kfunc, .show_in_kernel_list = true },
-  { "kretfunc", { "fr", "fexit" }, ProbeType::kretfunc },
-  { "iter", { "it" }, ProbeType::iter, .show_in_kernel_list = true },
-  { "rawtracepoint",
-    { "rt" },
-    ProbeType::rawtracepoint,
+  { .name = "kprobe",
+    .aliases = { "k" },
+    .type = ProbeType::kprobe,
+    .show_in_kernel_list = true },
+  { .name = "kretprobe", .aliases = { "kr" }, .type = ProbeType::kretprobe },
+  { .name = "uprobe",
+    .aliases = { "u" },
+    .type = ProbeType::uprobe,
+    .show_in_userspace_list = true },
+  { .name = "uretprobe", .aliases = { "ur" }, .type = ProbeType::uretprobe },
+  { .name = "usdt",
+    .aliases = { "U" },
+    .type = ProbeType::usdt,
+    .show_in_userspace_list = true },
+  { .name = "BEGIN", .aliases = { "BEGIN" }, .type = ProbeType::special },
+  { .name = "END", .aliases = { "END" }, .type = ProbeType::special },
+  { .name = "tracepoint",
+    .aliases = { "t" },
+    .type = ProbeType::tracepoint,
+    .show_in_kernel_list = true },
+  { .name = "profile", .aliases = { "p" }, .type = ProbeType::profile },
+  { .name = "interval", .aliases = { "i" }, .type = ProbeType::interval },
+  { .name = "software",
+    .aliases = { "s" },
+    .type = ProbeType::software,
+    .show_in_kernel_list = true },
+  { .name = "hardware",
+    .aliases = { "h" },
+    .type = ProbeType::hardware,
+    .show_in_kernel_list = true },
+  { .name = "watchpoint", .aliases = { "w" }, .type = ProbeType::watchpoint },
+  { .name = "asyncwatchpoint",
+    .aliases = { "aw" },
+    .type = ProbeType::asyncwatchpoint },
+  { .name = "kfunc",
+    .aliases = { "f", "fentry" },
+    .type = ProbeType::kfunc,
+    .show_in_kernel_list = true },
+  { .name = "kretfunc",
+    .aliases = { "fr", "fexit" },
+    .type = ProbeType::kretfunc },
+  { .name = "iter",
+    .aliases = { "it" },
+    .type = ProbeType::iter,
+    .show_in_kernel_list = true },
+  { .name = "rawtracepoint",
+    .aliases = { "rt" },
+    .type = ProbeType::rawtracepoint,
     .show_in_kernel_list = true },
 };
 
@@ -607,6 +706,22 @@ enum class AsyncAction {
 uint64_t asyncactionint(AsyncAction a);
 
 enum class PositionalParameterType { positional, count };
+
+namespace globalvars {
+
+enum class GlobalVar {
+  // Number of online CPUs at runtime, used for metric aggregation for functions
+  // like sum and avg
+  NUM_CPUS,
+  // Max CPU ID returned by bpf_get_smp_processor_id, used for simulating
+  // per-CPU maps in read-write global variables
+  MAX_CPU_ID,
+  // Scratch buffers used to avoid BPF stack allocation limits
+  FMT_STRINGS_BUFFER,
+  TUPLE_BUFFER,
+};
+
+} // namespace globalvars
 
 } // namespace bpftrace
 

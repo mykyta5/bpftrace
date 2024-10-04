@@ -44,7 +44,7 @@ add_custom_command(
   VERBATIM
   DEPENDS data_source_o)
 
-if(${LIBDW_FOUND})
+if(${LLDB_FOUND})
   # Generate dwarf_data from data_source.o
   set(DWARF_DATA_FILE ${CMAKE_CURRENT_BINARY_DIR}/dwarf_data)
   add_custom_command(
@@ -58,11 +58,11 @@ if(${LIBDW_FOUND})
     OUTPUT ${DWARF_DATA_HEX}
     COMMAND xxd -i < ${DWARF_DATA_FILE} > ${DWARF_DATA_HEX}
     DEPENDS ${DWARF_DATA_FILE})
-    
+
   set(CONFIGURE_DWARF_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/configure_dwarf_headers.cmake)
   set(DWARF_DATA_H_IN ${CMAKE_CURRENT_SOURCE_DIR}/dwarf_data.h.in)
   set(DWARF_DATA_H ${CMAKE_CURRENT_BINARY_DIR}/dwarf_data.h)
-  
+
   add_custom_command(
     OUTPUT ${DWARF_DATA_H}
     COMMAND
@@ -71,9 +71,10 @@ if(${LIBDW_FOUND})
       -DDWARF_DATA_HEX=${DWARF_DATA_HEX}
       -DDWARF_DATA_H_IN=${DWARF_DATA_H_IN}
       -DDWARF_DATA_H=${DWARF_DATA_H}
+      -DDWARF_DATA_CXX_PATH=${CMAKE_CURRENT_BINARY_DIR}/data_source_cxx
       -P ${CONFIGURE_DWARF_HEADERS}
-    DEPENDS ${FUNC_LIST_HEX} ${DWARF_DATA_HEX} ${CONFIGURE_DWARF_HEADERS})
-    
+      DEPENDS ${DWARF_DATA_H_IN} ${FUNC_LIST_HEX} ${DWARF_DATA_HEX} ${CONFIGURE_DWARF_HEADERS})
+
   add_custom_target(debuginfo_dwarf_data DEPENDS ${DWARF_DATA_H})
 endif()
 
@@ -89,6 +90,11 @@ add_custom_command(
     -DBTF_DATA_H_IN=${BTF_DATA_H_IN}
     -DBTF_DATA_H=${BTF_DATA_H}
     -P ${CONFIGURE_BTF_HEADERS}
-  DEPENDS ${BTF_DATA_HEX} ${FUNC_LIST_HEX} ${CONFIGURE_BTF_HEADERS})
+    DEPENDS ${BTF_DATA_H_IN} ${BTF_DATA_HEX} ${FUNC_LIST_HEX} ${CONFIGURE_BTF_HEADERS})
 
 add_custom_target(debuginfo_btf_data DEPENDS ${BTF_DATA_H})
+
+# BTF doesn't support C++, so we only generate a data_source_cxx executable
+# to run the field_analyser tests on.
+add_executable(data_source_cxx data_source_cxx.cpp)
+target_compile_options(data_source_cxx PRIVATE -g)

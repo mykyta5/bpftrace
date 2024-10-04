@@ -14,8 +14,8 @@ jobs:
     - uses: actions/checkout@v2
       with:
         fetch-depth: 0
-    - uses: DeterminateSystems/nix-installer-action@v4
-    - uses: DeterminateSystems/magic-nix-cache-action@v2
+    - uses: DeterminateSystems/nix-installer-action@v11
+    - uses: DeterminateSystems/magic-nix-cache-action@v6
     - name: clang-format
       run: nix develop --command git clang-format --diff origin/master
 
@@ -28,72 +28,60 @@ jobs:
     strategy:
       matrix:
         env:
-        - NAME: LLVM 10 Release
-          CMAKE_BUILD_TYPE: Release
-          NIX_TARGET: .#bpftrace-llvm10
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
-          TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 11 Release
-          CMAKE_BUILD_TYPE: Release
-          NIX_TARGET: .#bpftrace-llvm11
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
-          TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 12 Release
-          CMAKE_BUILD_TYPE: Release
-          NIX_TARGET: .#bpftrace-llvm12
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
-          TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 13 Release
-          CMAKE_BUILD_TYPE: Release
+        - NAME: LLVM 13
+          CMAKE_BUILD_TYPE: Debug
           NIX_TARGET: .#bpftrace-llvm13
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 14 Release
-          CMAKE_BUILD_TYPE: Release
+        - NAME: LLVM 14
+          CMAKE_BUILD_TYPE: Debug
           NIX_TARGET: .#bpftrace-llvm14
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 15 Release
-          CMAKE_BUILD_TYPE: Release
+        - NAME: LLVM 15
+          CMAKE_BUILD_TYPE: Debug
           NIX_TARGET: .#bpftrace-llvm15
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 16 Release
-          CMAKE_BUILD_TYPE: Release
+        - NAME: LLVM 16
+          CMAKE_BUILD_TYPE: Debug
           NIX_TARGET: .#bpftrace-llvm16
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 17 Release
+        - NAME: LLVM 17
+          CMAKE_BUILD_TYPE: Debug
+          NIX_TARGET: .#bpftrace-llvm17
+          TOOLS_TEST_DISABLE: biosnoop.bt
+        - NAME: LLVM 18 Release
           CMAKE_BUILD_TYPE: Release
-          NIX_TARGET: .#bpftrace-llvm17
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
+          NIX_TARGET: .#bpftrace-llvm18
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 17 Debug
+        - NAME: LLVM 18 Debug
           CMAKE_BUILD_TYPE: Debug
-          NIX_TARGET: .#bpftrace-llvm17
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
+          NIX_TARGET: .#bpftrace-llvm18
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: LLVM 17 Clang Debug
+        - NAME: LLVM 18 Clang Debug
           CMAKE_BUILD_TYPE: Debug
-          NIX_TARGET: .#bpftrace-llvm17
+          NIX_TARGET: .#bpftrace-llvm18
           CC: clang
           CXX: clang++
-          TOOLS_TEST_OLDVERSION: tcpdrop.bt
           TOOLS_TEST_DISABLE: biosnoop.bt
-        - NAME: Memleak test (LLVM 11 Debug)
+        - NAME: AOT (LLVM 18 Debug)
           CMAKE_BUILD_TYPE: Debug
-          NIX_TARGET: .#bpftrace-llvm11
+          NIX_TARGET: .#bpftrace-llvm18
+          RUN_TESTS: 0
+          RUN_AOT_TESTS: 1
+          AOT_SKIPLIST_FILE: .github/include/aot_skip.txt
+        - NAME: Memleak test (LLVM 18 Debug)
+          CMAKE_BUILD_TYPE: Debug
+          NIX_TARGET: .#bpftrace-llvm18
           RUN_MEMLEAK_TEST: 1
           RUN_TESTS: 0
-        - NAME: Memleak test (LLVM 11 Release)
+        - NAME: Memleak test (LLVM 18 Release)
           CMAKE_BUILD_TYPE: Release
-          NIX_TARGET: .#bpftrace-llvm11
+          NIX_TARGET: .#bpftrace-llvm18
           RUN_MEMLEAK_TEST: 1
           RUN_TESTS: 0
     steps:
     - uses: actions/checkout@v2
-    - uses: DeterminateSystems/nix-installer-action@v4
-    - uses: DeterminateSystems/magic-nix-cache-action@v2
+    - uses: DeterminateSystems/nix-installer-action@v11
+    - uses: DeterminateSystems/magic-nix-cache-action@v6
     - name: Load kernel modules
       # nf_tables and xfs are necessary for testing kernel modules BTF support
       run: |

@@ -1,8 +1,7 @@
 #include "mocks.h"
 #include "tracefs.h"
 
-namespace bpftrace {
-namespace test {
+namespace bpftrace::test {
 
 using ::testing::_;
 using ::testing::NiceMock;
@@ -11,17 +10,23 @@ using ::testing::StrictMock;
 
 void setup_mock_probe_matcher(MockProbeMatcher &matcher)
 {
-  ON_CALL(matcher, get_symbols_from_traceable_funcs(false))
-      .WillByDefault([](void) {
-        std::string ksyms = "SyS_read\n"
-                            "sys_read\n"
-                            "sys_write\n"
-                            "my_one\n"
-                            "my_two\n";
-        auto myval = std::unique_ptr<std::istream>(
-            new std::istringstream(ksyms));
-        return myval;
-      });
+  ON_CALL(matcher, get_symbols_from_traceable_funcs(false)).WillByDefault([]() {
+    std::string ksyms = "SyS_read\n"
+                        "sys_read\n"
+                        "sys_write\n"
+                        "my_one\n"
+                        "my_two\n";
+    auto myval = std::unique_ptr<std::istream>(new std::istringstream(ksyms));
+    return myval;
+  });
+
+  ON_CALL(matcher, get_symbols_from_traceable_funcs(true)).WillByDefault([]() {
+    std::string ksyms = "kernel_mod:func_in_mod\n"
+                        "kernel_mod:other_func_in_mod\n"
+                        "other_kernel_mod:func_in_mod\n";
+    auto myval = std::unique_ptr<std::istream>(new std::istringstream(ksyms));
+    return myval;
+  });
 
   ON_CALL(matcher, get_symbols_from_file(tracefs::available_events()))
       .WillByDefault([](const std::string &) {
@@ -31,7 +36,8 @@ void setup_mock_probe_matcher(MockProbeMatcher &matcher)
                                   "sched_extra:sched_extra\n"
                                   "notsched:bar\n"
                                   "file:filename\n"
-                                  "tcp:some_tcp_tp\n";
+                                  "tcp:some_tcp_tp\n"
+                                  "btf:tag\n";
         return std::unique_ptr<std::istream>(
             new std::istringstream(tracepoints));
       });
@@ -45,7 +51,6 @@ void setup_mock_probe_matcher(MockProbeMatcher &matcher)
                          "/bin/sh:_Z11cpp_mangledv\n"
                          "/bin/sh:_Z18cpp_mangled_suffixv\n";
   std::string bash_usyms = "/bin/bash:first_open\n";
-  std::string proc_usyms = "/proc/1234/exe:third_open\n";
   ON_CALL(matcher, get_func_symbols_from_file(_, "/bin/sh"))
       .WillByDefault([sh_usyms](int, const std::string &) {
         return std::unique_ptr<std::istream>(new std::istringstream(sh_usyms));
@@ -56,12 +61,6 @@ void setup_mock_probe_matcher(MockProbeMatcher &matcher)
         return std::unique_ptr<std::istream>(
             new std::istringstream(sh_usyms + bash_usyms));
       });
-  ON_CALL(matcher, get_func_symbols_from_file(_, "*"))
-      .WillByDefault(
-          [sh_usyms, bash_usyms, proc_usyms](int, const std::string &) {
-            return std::unique_ptr<std::istream>(
-                new std::istringstream(sh_usyms + bash_usyms + proc_usyms));
-          });
 
   std::string sh_usdts = "/bin/sh:prov1:tp1\n"
                          "/bin/sh:prov1:tp2\n"
@@ -69,7 +68,6 @@ void setup_mock_probe_matcher(MockProbeMatcher &matcher)
                          "/bin/sh:prov2:notatp\n"
                          "/bin/sh:nahprov:tp\n";
   std::string bash_usdts = "/bin/bash:prov1:tp3\n";
-  std::string proc_usdts = "/proc/1234/exe:prov2:tp4\n";
   ON_CALL(matcher, get_symbols_from_usdt(_, "/bin/sh"))
       .WillByDefault([sh_usdts](int, const std::string &) {
         return std::unique_ptr<std::istream>(new std::istringstream(sh_usdts));
@@ -79,16 +77,12 @@ void setup_mock_probe_matcher(MockProbeMatcher &matcher)
         return std::unique_ptr<std::istream>(
             new std::istringstream(sh_usdts + bash_usdts));
       });
-  ON_CALL(matcher, get_symbols_from_usdt(_, "*"))
-      .WillByDefault(
-          [sh_usdts, bash_usdts, proc_usdts](int, const std::string &) {
-            return std::unique_ptr<std::istream>(
-                new std::istringstream(sh_usdts + bash_usdts + proc_usdts));
-          });
 }
 
 void setup_mock_bpftrace(MockBPFtrace &bpftrace)
 {
+  bpftrace.delta_taitime_ = timespec{};
+
   bpftrace.parse_btf({ "vmlinux" });
   // Fill in some default tracepoint struct definitions
   bpftrace.structs.Add("struct _tracepoint_sched_sched_one", 8);
@@ -128,6 +122,17 @@ void setup_mock_bpftrace(MockBPFtrace &bpftrace)
   bpftrace.structs.Lookup("struct _tracepoint_file_filename")
       .lock()
       ->AddField("filename", ptr_type, 8, std::nullopt, false);
+  bpftrace.structs.Add("struct _tracepoint_btf_tag", 16);
+  auto ptr_type_w_tag = CreatePointer(CreateInt8());
+  ptr_type_w_tag.SetBtfTypeTags({ "rcu" });
+  auto ptr_type_w_bad_tag = CreatePointer(CreateInt8());
+  ptr_type_w_bad_tag.SetBtfTypeTags({ "rcu", "percpu" });
+  bpftrace.structs.Lookup("struct _tracepoint_btf_tag")
+      .lock()
+      ->AddField("parent", ptr_type_w_tag, 8, std::nullopt, false);
+  bpftrace.structs.Lookup("struct _tracepoint_btf_tag")
+      .lock()
+      ->AddField("real_parent", ptr_type_w_bad_tag, 16, std::nullopt, false);
 }
 
 std::unique_ptr<MockBPFtrace> get_mock_bpftrace()
@@ -156,5 +161,25 @@ std::unique_ptr<MockBPFtrace> get_strict_mock_bpftrace()
   return bpftrace;
 }
 
-} // namespace test
-} // namespace bpftrace
+std::unique_ptr<MockUSDTHelper> get_mock_usdt_helper(int num_locations)
+{
+  auto usdt_helper = std::make_unique<NiceMock<MockUSDTHelper>>();
+
+  ON_CALL(*usdt_helper, find(_, _, _, _))
+      .WillByDefault([num_locations](int,
+                                     const std::string &,
+                                     const std::string &,
+                                     const std::string &) {
+        return usdt_probe_entry{
+          .path = "",
+          .provider = "",
+          .name = "",
+          .semaphore_offset = 0,
+          .num_locations = num_locations,
+        };
+      });
+
+  return usdt_helper;
+}
+
+} // namespace bpftrace::test

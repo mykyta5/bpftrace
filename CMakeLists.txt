@@ -5,7 +5,7 @@ cmake_policy(SET CMP0057 NEW)
 
 # bpftrace version number components.
 set(bpftrace_VERSION_MAJOR 0)
-set(bpftrace_VERSION_MINOR 20)
+set(bpftrace_VERSION_MINOR 21)
 set(bpftrace_VERSION_PATCH 0)
 
 include(GNUInstallDirs)
@@ -17,21 +17,24 @@ set(BUILD_ASAN OFF CACHE BOOL "Build bpftrace with -fsanitize=address")
 set(ENABLE_MAN ON CACHE BOOL "Build man pages")
 set(BUILD_TESTING ON CACHE BOOL "Build test suite")
 set(ENABLE_TEST_VALIDATE_CODEGEN ON CACHE BOOL "Run LLVM IR validation tests")
-set(VENDOR_GTEST OFF CACHE BOOL "Clone gtest from github")
 set(BUILD_FUZZ OFF CACHE BOOL "Build bpftrace for fuzzing")
 set(USE_LIBFUZZER OFF CACHE BOOL "Use libfuzzer for fuzzing")
 set(FUZZ_TARGET "codegen" CACHE STRING "Fuzzing target")
+set(ENABLE_SYSTEMD OFF CACHE BOOL "Enable systemd integration")
+set(KERNEL_HEADERS_DIR "" CACHE PATH "Hard-code kernel headers directory")
+set(SYSTEM_INCLUDE_PATHS "auto" CACHE STRING "Hard-code system include paths (colon separated, the default value \"auto\" queries clang at runtime)")
 
 set(ENABLE_SKB_OUTPUT ON CACHE BOOL "Enable skb_output, will include libpcap")
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
-set (CMAKE_CXX_STANDARD 17)
+set (CMAKE_CXX_STANDARD 20)
 set (CMAKE_CXX_STANDARD_REQUIRED ON)
 set (CMAKE_CXX_EXTENSIONS OFF)
 
 add_compile_options("-Wall")
 add_compile_options("-Wextra")
+add_compile_options("-Werror=missing-field-initializers")
 add_compile_options("-Werror=undef")
 add_compile_options("-Wpointer-arith")
 add_compile_options("-Wcast-align")
@@ -82,6 +85,11 @@ include_directories(SYSTEM ${LIBBCC_INCLUDE_DIRS})
 
 find_package(LibBpf REQUIRED)
 include_directories(SYSTEM ${LIBBPF_INCLUDE_DIRS})
+# TODO: update to 1.5 once [1] is released.
+# [1] https://github.com/libbpf/libbpf/commit/dd589c3b31c13164bdc61ed174fbae6fe76c8308
+if(LIBBPF_VERSION_MAJOR VERSION_LESS 1)
+  message(SEND_ERROR "bpftrace requires libbpf 1.0 or greater")
+endif()
 
 find_package(LibElf REQUIRED)
 include_directories(SYSTEM ${LIBELF_INCLUDE_DIRS})
@@ -102,7 +110,7 @@ endif()
 bison_target(bison_parser src/parser.yy ${CMAKE_BINARY_DIR}/parser.tab.cc COMPILE_FLAGS ${BISON_FLAGS} VERBOSE)
 flex_target(flex_lexer src/lexer.l ${CMAKE_BINARY_DIR}/lex.yy.cc)
 add_flex_bison_dependency(flex_lexer bison_parser)
-add_library(parser ${BISON_bison_parser_OUTPUTS} ${FLEX_flex_lexer_OUTPUTS})
+add_library(parser STATIC ${BISON_bison_parser_OUTPUTS} ${FLEX_flex_lexer_OUTPUTS})
 target_compile_options(parser PRIVATE "-w")
 target_include_directories(parser PUBLIC src src/ast ${CMAKE_BINARY_DIR})
 
@@ -113,10 +121,14 @@ set(CMAKE_REQUIRED_DEFINITIONS)
 
 find_package(LibBfd)
 find_package(LibOpcodes)
-find_package(LibDw)
 
 if(ENABLE_SKB_OUTPUT)
-find_package(LibPcap)
+  find_package(LibPcap)
+endif()
+
+if(ENABLE_SYSTEMD)
+  find_package(PkgConfig)
+  pkg_check_modules(libsystemd REQUIRED IMPORTED_TARGET libsystemd)
 endif()
 
 if(POLICY CMP0075)
@@ -138,8 +150,16 @@ else()
   find_package(LLVM REQUIRED)
 endif()
 
-set(MIN_LLVM_MAJOR 6)
-set(MAX_LLVM_MAJOR 18)
+set(MIN_LLVM_MAJOR 13)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  # We assume bpftrace is not being packaged when CMAKE_BUILD_TYPE=Debug.
+  # So allow building with any LLVM version. This is purely for developers.
+  # Packagers are highly discouraged from shipping bpftrace with untested LLVM
+  # releases.
+  set(MAX_LLVM_MAJOR 999)
+else()
+  set(MAX_LLVM_MAJOR 18)
+endif()
 
 if((${LLVM_VERSION_MAJOR} VERSION_LESS ${MIN_LLVM_MAJOR}) OR (${LLVM_VERSION_MAJOR} VERSION_GREATER ${MAX_LLVM_MAJOR}))
   message(SEND_ERROR "Unsupported LLVM version found via ${LLVM_INCLUDE_DIRS}: ${LLVM_VERSION_MAJOR}")
@@ -154,12 +174,11 @@ add_definitions(${LLVM_DEFINITIONS})
 find_package(Clang REQUIRED)
 include_directories(SYSTEM ${CLANG_INCLUDE_DIRS})
 
+find_package(LLDB)
+
 # BPFtrace compile definitions
 
 set(BPFTRACE_FLAGS)
-if (ALLOW_UNSAFE_PROBE)
-  set(BPFTRACE_FLAGS "${BPFTRACE_FLAGS}" HAVE_UNSAFE_PROBE)
-endif(ALLOW_UNSAFE_PROBE)
 
 if(HAVE_NAME_TO_HANDLE_AT)
   set(BPFTRACE_FLAGS "${BPFTRACE_FLAGS}" HAVE_NAME_TO_HANDLE_AT=1)
@@ -175,8 +194,8 @@ if(HAVE_BFD_DISASM)
   endif(LIBBFD_INIT_DISASM_INFO_FOUR_ARGS_SIGNATURE)
 endif(HAVE_BFD_DISASM)
 
-if (LIBDW_FOUND)
-  set(BPFTRACE_FLAGS "${BPFTRACE_FLAGS}" HAVE_LIBDW)
+if (LLDB_FOUND)
+  set(BPFTRACE_FLAGS "${BPFTRACE_FLAGS}" HAVE_LIBLLDB)
 endif ()
 
 if(LIBPCAP_FOUND)
@@ -186,6 +205,10 @@ endif(LIBPCAP_FOUND)
 if (HAVE_LIBBPF_UPROBE_MULTI)
   set(BPFTRACE_FLAGS "${BPFTRACE_FLAGS}" HAVE_LIBBPF_UPROBE_MULTI)
 endif(HAVE_LIBBPF_UPROBE_MULTI)
+
+if(ENABLE_SYSTEMD)
+  set(BPFTRACE_FLAGS "${BPFTRACE_FLAGS}" HAVE_LIBSYSTEMD)
+endif()
 
 add_subdirectory(src)
 if (BUILD_TESTING)
